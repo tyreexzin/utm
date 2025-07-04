@@ -404,59 +404,65 @@ app.listen(PORT || 3000, () => {
                 let facebook_purchase_sent = false;
 
                 // --- 4. ENVIO PARA UTMIFY ---
-                if (API_KEY) {
-                    const platform = (texto.match(plataformaPagamentoRegex) || [])[1]?.trim() || 'UnknownPlatform';
-                    const paymentMethod = (texto.match(metodoPagamentoRegex) || [])[1]?.trim().toLowerCase().replace(' ', '_') || 'unknown';
-                    const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
-                    
-                    const utmifyPayload = {
-                        orderId: transaction_id,
-                        platform: platform,
-                        paymentMethod: paymentMethod,
-                        status: 'paid',
-                        createdAt: agoraUtc,
-                        approvedDate: agoraUtc,
-                        customer: {
-                            name: finalCustomerName,
-                            email: finalCustomerEmail || "naoinformado@utmify.com",
-                            phone: null,
-                            document: finalCustomerDocument,
-                            ip: matchedFrontendUtms?.ip || '0.0.0.0'
-                        },
-                        products: [{
-                            id: 'acesso-vip-bundle',
-                            name: 'Acesso VIP',
-                            planId: '',
-                            planName: '',
-                            quantity: 1,
-                            priceInCents: Math.round(finalValor * 100)
-                        }],
-                        commission: {
-                            totalPriceInCents: Math.round(finalValor * 100),
-                            gatewayFeeInCents: 0,
-                            userCommissionInCents: Math.round(finalValor * 100),
-                            currency: 'BRL'
-                        },
-                        isTest: false
-                    };
-                    
-                    if (matchedFrontendUtms) {
-                        utmifyPayload.trackingParameters = {
-                            utm_source: matchedFrontendUtms.utm_source || null,
-                            utm_medium: matchedFrontendUtms.utm_medium || null,
-                            utm_campaign: matchedFrontendUtms.utm_campaign || null,
-                            utm_content: matchedFrontendUtms.utm_content || null,
-                            utm_term: matchedFrontendUtms.utm_term || null,
-                        };
-                    }
-                    
-                    try {
-                        const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
-                        console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
-                    } catch (err) { 
-                        console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message); 
-                    }
-                }
+        if (API_KEY) {
+            let trackingParams = {
+                utm_source: null,
+                utm_medium: null,
+                utm_campaign: null,
+                utm_content: null,
+                utm_term: null,
+            };
+
+            // 2. Se encontrarmos dados de clique, preenchemos o objeto.
+            if (matchedFrontendUtms) {
+                console.log(`✅ [BOT] UTMs para ${transaction_id} atribuídas!`);
+                trackingParams.utm_source = matchedFrontendUtms.utm_source || null;
+                trackingParams.utm_medium = matchedFrontendUtms.utm_medium || null;
+                trackingParams.utm_campaign = matchedFrontendUtms.utm_campaign || null;
+                trackingParams.utm_content = matchedFrontendUtms.utm_content || null;
+                trackingParams.utm_term = matchedFrontendUtms.utm_term || null;
+            } else {
+                console.log(`⚠️ [BOT] Nenhuma UTM correspondente encontrada.`);
+            }
+
+            const platform = (texto.match(plataformaPagamentoRegex) || [])[1]?.trim() || 'UnknownPlatform';
+            const paymentMethod = (texto.match(metodoPagamentoRegex) || [])[1]?.trim().toLowerCase().replace(' ', '_') || 'unknown';
+            const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
+            
+            // 3. Montamos o payload final, garantindo que trackingParameters sempre seja um objeto válido.
+            const utmifyPayload = {
+                orderId: transaction_id,
+                platform: platform,
+                paymentMethod: paymentMethod,
+                status: 'paid',
+                createdAt: agoraUtc,
+                approvedDate: agoraUtc,
+                customer: {
+                    name: finalCustomerName,
+                    email: finalCustomerEmail || "naoinformado@utmify.com",
+                    phone: null,
+                    document: finalCustomerDocument,
+                    ip: matchedFrontendUtms?.ip || '0.0.0.0'
+                },
+                products: [{
+                    id: 'acesso-vip-bundle', name: 'Acesso VIP', planId: '', planName: '',
+                    quantity: 1, priceInCents: Math.round(finalValor * 100)
+                }],
+                trackingParameters: trackingParams, // Usamos o objeto sempre válido aqui
+                commission: {
+                    totalPriceInCents: Math.round(finalValor * 100), gatewayFeeInCents: 0,
+                    userCommissionInCents: Math.round(finalValor * 100), currency: 'BRL'
+                },
+                isTest: false
+            };
+            
+            try {
+                const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
+                console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
+            } catch (err) { 
+                console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message); 
+            }
+        }
 
                 // --- 5. ENVIO PARA FACEBOOK ---
                 if (FACEBOOK_PIXEL_ID && FACEBOOK_API_TOKEN) {
