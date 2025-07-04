@@ -46,7 +46,7 @@ pool.on('connect', () => {
 
 pool.on('error', (err) => {
     console.error('❌ Erro inesperado no pool do PostgreSQL:', err);
-    process.exit(-1);
+    process.exit(1);
 });
 
 // --- Função Auxiliar para Criptografia ---
@@ -282,7 +282,7 @@ app.listen(PORT || 3000, () => {
         }
 
         console.log('Iniciando userbot...');
-        const client = new TelegramClient(new StringSession(TELEGRAM_SESSION), apiId, apiHash, { connectionRetries: 5 });
+        const client = new TelegramClient(new StringSession(TELEGRAM_SESSION), parseInt(apiId), apiHash, { connectionRetries: 5 });
         try {
             await client.start({
                 phoneNumber: async () => input.text('Digite seu número com DDI: '),
@@ -333,6 +333,8 @@ app.listen(PORT || 3000, () => {
                 const nomeCompletoRegex = /Nome\s+Completo[:：]?\s*(.+)/i;
                 const emailRegex = /E-mail[:：]?\s*(\S+@\S+\.\S+)/i;
                 const codigoVendaRegex = /Código\s+de\s+Venda[:：]?\s*(.+)/i;
+                
+                // <<< LINHAS FALTANTES ADICIONADAS AQUI >>>
                 const plataformaPagamentoRegex = /Plataforma\s+Pagamento[:：]?\s*(.+)/i;
                 const metodoPagamentoRegex = /M[ée]todo\s+Pagamento[:：]?\s*(.+)/i;
                 
@@ -475,7 +477,7 @@ app.listen(PORT || 3000, () => {
                     };
                     
                     Object.keys(userData).forEach(key => {
-                        if (!userData[key] || userData[key].length === 0 || !userData[key][0]) {
+                        if (!userData[key] || (Array.isArray(userData[key]) && userData[key].length === 0) || userData[key][0] === null) {
                             delete userData[key];
                         }
                     });
