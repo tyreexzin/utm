@@ -328,6 +328,8 @@ app.listen(PORT || 3000, () => {
         const nomeCompletoRegex = /Nome\s+Completo[:：]?\s*(.+)/i;
         const emailRegex = /E-mail[:：]?\s*(\S+@\S+\.\S+)/i;
         const codigoVendaRegex = /Código\s+de\s+Venda[:：]?\s*(.+)/i;
+        const plataformaPagamentoRegex = /Plataforma\s+Pagamento[:：]?\s*(.+)/i;
+        const metodoPagamentoRegex = /M[ée]todo\s+Pagamento[:：]?\s*(.+)/i;
         
         const nomeMatch = texto.match(nomeCompletoRegex);
         const emailMatch = texto.match(emailRegex);
