@@ -238,6 +238,16 @@ app.listen(PORT || 3000, () => {
                     commission: { totalPriceInCents: Math.round(valorLiquidoNum * 100), gatewayFeeInCents: 0, userCommissionInCents: Math.round(valorLiquidoNum * 100), currency: 'BRL' },
                     isTest: false
                 };
+
+                if (matchedFrontendUtms) {
+                    utmifyPayload.trackingParameters = {
+                        utm_source: matchedFrontendUtms.utm_source || null,
+                        utm_medium: matchedFrontendUtms.utm_medium || null,
+                        utm_campaign: matchedFrontendUtms.utm_campaign || null,
+                        utm_content: matchedFrontendUtms.utm_content || null,
+                        utm_term: matchedFrontendUtms.utm_term || null,
+                    };
+                }
                 
                 try {
                     const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
