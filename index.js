@@ -17,7 +17,7 @@ app.use(express.json());
 // --- Variáveis de Ambiente e Constantes ---
 const { 
     TELEGRAM_SESSION, DATABASE_URL, PORT, 
-    API_KEY, // Para UTMify
+    API_KEY, // Para UTMify (conforme seu código)
     FACEBOOK_PIXEL_ID, FACEBOOK_API_TOKEN
 } = process.env;
 
@@ -32,65 +32,29 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 pool.on('connect', () => console.log('✅ PostgreSQL conectado!'));
-pool.on('error', (err) => { console.error('❌ Erro inesperado no pool do PostgreSQL:', err); process.exit(-1); });
+pool.on('error', (err) => { console.error('❌ Erro inesperado no pool do PostgreSQL:', err); process.exit(1); });
 
-// --- Função Auxiliar para Criptografia ---
-function hashData(data) {
-    if (!data) return null;
-    return crypto.createHash('sha256').update(String(data).toLowerCase().trim()).digest('hex');
-}
+// --- Funções Auxiliares e de Banco de Dados ---
+const hashData = (data) => data ? crypto.createHash('sha256').update(String(data).toLowerCase().trim()).digest('hex') : null;
 
-// --- FUNÇÃO PARA INICIALIZAR TABELAS NO POSTGRESQL ---
 async function setupDatabase() {
     const client = await pool.connect();
     try {
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS vendas (
-                id SERIAL PRIMARY KEY, chave TEXT UNIQUE NOT NULL, hash TEXT UNIQUE NOT NULL,
-                valor REAL NOT NULL, utm_source TEXT, utm_medium TEXT, utm_campaign TEXT, utm_content TEXT, utm_term TEXT,
-                order_id TEXT, transaction_id TEXT, ip TEXT, user_agent TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                facebook_purchase_sent BOOLEAN DEFAULT FALSE
-            );
-        `);
-        console.log('✅ Tabela "vendas" verificada/criada no PostgreSQL.');
-
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS frontend_utms (
-                id SERIAL PRIMARY KEY, unique_click_id TEXT UNIQUE NOT NULL, timestamp_ms BIGINT NOT NULL,
-                valor REAL, fbclid TEXT, fbc TEXT, fbp TEXT, utm_source TEXT, utm_medium TEXT,
-                utm_campaign TEXT, utm_content TEXT, utm_term TEXT, ip TEXT, user_agent TEXT,
-                received_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-        console.log('✅ Tabela "frontend_utms" verificada/criada/atualizada no PostgreSQL.');
-
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS telegram_users (
-                telegram_user_id TEXT PRIMARY KEY, unique_click_id TEXT,
-                last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-        console.log('✅ Tabela "telegram_users" verificada/criada no PostgreSQL.');
-    } catch (err) {
-        console.error('❌ Erro ao configurar tabelas no PostgreSQL:', err.message);
-        process.exit(1);
-    } finally {
-        client.release();
-    }
+        await client.query(`CREATE TABLE IF NOT EXISTS vendas (id SERIAL PRIMARY KEY, chave TEXT UNIQUE NOT NULL, hash TEXT UNIQUE NOT NULL, valor REAL NOT NULL, utm_source TEXT, utm_medium TEXT, utm_campaign TEXT, utm_content TEXT, utm_term TEXT, order_id TEXT, transaction_id TEXT, ip TEXT, user_agent TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, facebook_purchase_sent BOOLEAN DEFAULT FALSE);`);
+        console.log('✅ Tabela "vendas" verificada.');
+        await client.query(`CREATE TABLE IF NOT EXISTS frontend_utms (id SERIAL PRIMARY KEY, unique_click_id TEXT UNIQUE NOT NULL, timestamp_ms BIGINT NOT NULL, valor REAL, fbclid TEXT, fbc TEXT, fbp TEXT, utm_source TEXT, utm_medium TEXT, utm_campaign TEXT, utm_content TEXT, utm_term TEXT, ip TEXT, user_agent TEXT, received_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);`);
+        console.log('✅ Tabela "frontend_utms" verificada.');
+        await client.query(`CREATE TABLE IF NOT EXISTS telegram_users (telegram_user_id TEXT PRIMARY KEY, unique_click_id TEXT, last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);`);
+        console.log('✅ Tabela "telegram_users" verificada.');
+    } finally { client.release(); }
 }
 
-// --- FUNÇÕES DE UTILIDADE (Originais Mantidas) ---
 function gerarChaveUnica({ transaction_id }) { return `chave-${transaction_id}`; }
 function gerarHash({ transaction_id }) { return `hash-${transaction_id}`; }
 
 async function salvarVenda(venda) {
     console.log('💾 Tentando salvar venda no banco (PostgreSQL)...');
-    const sql = `
-        INSERT INTO vendas (chave, hash, valor, utm_source, utm_medium, utm_campaign, utm_content, utm_term, order_id, transaction_id, ip, user_agent, facebook_purchase_sent)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (hash) DO NOTHING;
-    `;
+    const sql = `INSERT INTO vendas (chave, hash, valor, utm_source, utm_medium, utm_campaign, utm_content, utm_term, order_id, transaction_id, ip, user_agent, facebook_purchase_sent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (hash) DO NOTHING;`;
     const valores = [venda.chave, venda.hash, venda.valor, venda.utm_source, venda.utm_medium, venda.utm_campaign, venda.utm_content, venda.utm_term, venda.orderId, venda.transaction_id, venda.ip, venda.userAgent, venda.facebook_purchase_sent];
     try {
         const res = await pool.query(sql, valores);
@@ -101,11 +65,8 @@ async function salvarVenda(venda) {
 
 async function vendaExiste(hash) {
     console.log(`🔎 Verificando se venda com hash ${hash} existe no PostgreSQL...`);
-    const sql = 'SELECT COUNT(*) AS total FROM vendas WHERE hash = $1';
-    try {
-        const res = await pool.query(sql, [hash]);
-        return res.rows[0].total > 0;
-    } catch (err) { console.error('❌ Erro ao verificar venda existente (PostgreSQL):', err.message); return false; }
+    const res = await pool.query('SELECT COUNT(*) AS total FROM vendas WHERE hash = $1', [hash]);
+    return res.rows[0].total > 0;
 }
 
 async function saveUserClickAssociation(telegramUserId, uniqueClickId) {
@@ -145,15 +106,16 @@ async function limparFrontendUtmsAntigos() {
     } catch (err) { console.error('❌ Erro ao limpar UTMs antigos do frontend:', err.message); }
 }
 
-// --- ENDPOINT HTTP ---
+// --- ENDPOINTS HTTP ---
 app.post('/frontend-utm-data', (req, res) => {
-    const { unique_click_id, timestamp, valor, fbclid, fbc, fbp, utm_source, utm_medium, utm_campaign, utm_content, utm_term, ip, user_agent } = req.body;
+    const { unique_click_id, timestamp } = req.body;
     console.log('🚀 [BACKEND] Dados do frontend recebidos:', req.body);
     if (!unique_click_id || !timestamp) { return res.status(400).send('unique_click_id e Timestamp são obrigatórios.'); }
-    salvarFrontendUtms({ unique_click_id, timestamp, valor, fbclid, fbc, fbp, utm_source, utm_medium, utm_campaign, utm_content, utm_term, ip, user_agent });
+    salvarFrontendUtms(req.body);
     res.status(200).send('Dados recebidos com sucesso!');
 });
 app.get('/ping', (req, res) => { console.log('💚 [PING] Recebida requisição /ping. Serviço está ativo.'); res.status(200).send('Pong!'); });
+
 
 // --- INICIALIZAÇÃO E LÓGICA PRINCIPAL ---
 app.listen(PORT || 3000, () => {
@@ -164,7 +126,7 @@ app.listen(PORT || 3000, () => {
         console.log('🧹 Limpeza de UTMs antigos agendada para cada 1 hora.');
 
         console.log('Iniciando userbot...');
-        const client = new TelegramClient(new StringSession(TELEGRAM_SESSION), apiId, apiHash, { connectionRetries: 5 });
+        const client = new TelegramClient(new StringSession(TELEGRAM_SESSION), parseInt(apiId), apiHash, { connectionRetries: 5 });
         try {
             await client.start({
                 phoneNumber: async () => input.text('Digite seu número com DDI: '),
@@ -223,37 +185,59 @@ app.listen(PORT || 3000, () => {
                     console.log(`⚠️ [BOT] Código de Venda não encontrado na mensagem.`);
                 }
 
-                if (matchedFrontendUtms) console.log(`✅ [BOT] UTMs para ${transaction_id} atribuídas!`);
+                // ==============================================================
+                // LÓGICA UTMIFY INSERIDA CONFORME SOLICITADO
+                // ==============================================================
+                let utmsEncontradas = { utm_source: null, utm_medium: null, utm_campaign: null, utm_content: null, utm_term: null };
+                let ipClienteFrontend = 'telegram';
                 
-                // --- Bloco de envio para UTMify ---
+                if (matchedFrontendUtms) {
+                    utmsEncontradas.utm_source = matchedFrontendUtms.utm_source;
+                    utmsEncontradas.utm_medium = matchedFrontendUtms.utm_medium;
+                    utmsEncontradas.utm_campaign = matchedFrontendUtms.utm_campaign;
+                    utmsEncontradas.utm_content = matchedFrontendUtms.utm_content;
+                    utmsEncontradas.utm_term = matchedFrontendUtms.utm_term;
+                    ipClienteFrontend = matchedFrontendUtms.ip || 'frontend_matched';
+                    console.log(`✅ [BOT] UTMs para ${transaction_id} atribuídas!`);
+                } else {
+                    console.log(`⚠️ [BOT] Nenhuma UTM correspondente encontrada para ${transaction_id}. Enviando para UTMify sem UTMs de atribuição.`);
+                }
+        
+                const orderId = transaction_id;
+                const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
                 const platform = (texto.match(plataformaPagamentoRegex) || [])[1]?.trim() || 'UnknownPlatform';
                 const paymentMethod = (texto.match(metodoPagamentoRegex) || [])[1]?.trim().toLowerCase().replace(' ', '_') || 'unknown';
-                const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
-                
-                const utmifyPayload = {
-                    orderId: transaction_id, platform, paymentMethod, status: 'paid', createdAt: agoraUtc, approvedDate: agoraUtc,
-                    customer: { name: customerName, email: customerEmail || "naoinformado@utmify.com", phone: null, document: null, ip: matchedFrontendUtms?.ip || '0.0.0.0' },
+                const status = 'paid';
+        
+                const payload = {
+                    orderId: orderId,
+                    platform: platform,
+                    paymentMethod: paymentMethod,
+                    status: status,
+                    createdAt: agoraUtc,
+                    approvedDate: agoraUtc,
+                    customer: { name: customerName, email: customerEmail || "naoinformado@utmify.com", phone: null, document: null, country: 'BR', ip: ipClienteFrontend },
                     products: [{ id: 'acesso-vip-bundle', name: 'Acesso VIP', planId: '', planName: '', quantity: 1, priceInCents: Math.round(valorLiquidoNum * 100) }],
-                    trackingParameters: { utm_source: matchedFrontendUtms?.utm_source, utm_medium: matchedFrontendUtms?.utm_medium, utm_campaign: matchedFrontendUtms?.utm_campaign, utm_content: matchedFrontendUtms?.utm_content, utm_term: matchedFrontendUtms?.utm_term },
+                    trackingParameters: utmsEncontradas,
                     commission: { totalPriceInCents: Math.round(valorLiquidoNum * 100), gatewayFeeInCents: 0, userCommissionInCents: Math.round(valorLiquidoNum * 100), currency: 'BRL' },
                     isTest: false
                 };
-
-                if (matchedFrontendUtms) {
-                    utmifyPayload.trackingParameters = {
-                        utm_source: matchedFrontendUtms.utm_source || null,
-                        utm_medium: matchedFrontendUtms.utm_medium || null,
-                        utm_campaign: matchedFrontendUtms.utm_campaign || null,
-                        utm_content: matchedFrontendUtms.utm_content || null,
-                        utm_term: matchedFrontendUtms.utm_term || null,
-                    };
+        
+                for (const key in payload.trackingParameters) {
+                    if (payload.trackingParameters[key] === '') {
+                        payload.trackingParameters[key] = null;
+                    }
                 }
-                
+        
                 try {
-                    const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
+                    const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, { headers: { 'x-api-token': API_KEY } });
                     console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
-                } catch (err) { console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message); }
-
+                    console.log('📦 [BOT] Pedido criado na UTMify:', res.data);
+                } catch (err) {
+                    console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message);
+                }
+                // ==============================================================
+                
                 // --- Bloco de envio para Facebook ---
                 if (FACEBOOK_PIXEL_ID && FACEBOOK_API_TOKEN) {
                     console.log('➡️  [BOT] Iniciando envio para API de Conversões do Facebook...');
@@ -274,8 +258,12 @@ app.listen(PORT || 3000, () => {
                         await axios.post(`https://graph.facebook.com/v19.0/${FACEBOOK_PIXEL_ID}/events?access_token=${FACEBOOK_API_TOKEN}`, facebookPayload);
                         console.log(`✅ [BOT] Evento 'Purchase' (${transaction_id}) enviado para o Facebook.`);
                         facebook_purchase_sent = true;
-                    } catch (err) { console.error('❌ [BOT] Erro ao enviar para o Facebook:', err.response?.data?.error || err.message); }
-                } else { console.log('⚠️  [BOT] Credenciais do Facebook não configuradas. Pulando etapa.'); }
+                    } catch (err) {
+                        console.error('❌ [BOT] Erro ao enviar para o Facebook:', err.response?.data?.error || err.message);
+                    }
+                } else {
+                    console.log('⚠️  [BOT] Credenciais do Facebook não configuradas. Pulando etapa.');
+                }
                 
                 await salvarVenda({
                     chave: gerarChaveUnica({ transaction_id }), hash, valor: valorLiquidoNum,
@@ -283,7 +271,10 @@ app.listen(PORT || 3000, () => {
                     orderId: transaction_id, transaction_id, ip: matchedFrontendUtms?.ip, userAgent: matchedFrontendUtms?.user_agent,
                     facebook_purchase_sent
                 });
-            } catch (err) { console.error('❌ [BOT] Erro geral ao processar mensagem:', err.message); }
+
+            } catch (err) {
+                console.error('❌ [BOT] Erro geral ao processar mensagem:', err.message);
+            }
         }, new NewMessage({ chats: [CHAT_ID] }));
     })();
 });
