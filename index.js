@@ -1,7 +1,3 @@
-// =================================================================
-// CÓDIGO FINAL E DEFINITIVO - CORREÇÃO UTMIFY (05/07/2025)
-// =================================================================
-
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
