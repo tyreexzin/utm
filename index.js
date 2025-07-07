@@ -272,10 +272,37 @@ app.get('/ping', (req, res) => {
 // --- INICIALIZAÇÃO E LÓGICA PRINCIPAL ---
 app.listen(PORT || 3000, () => {
     console.log(`🌐 Servidor HTTP Express escutando na porta ${PORT || 3000}.`);
+
+    // --- LÓGICA DE AUTO-PING ---
+    // Define o intervalo do ping em minutos.
+    const PING_INTERVALO_MINUTOS = 1; 
+    const PING_INTERVALO_MS = PING_INTERVALO_MINUTOS * 60 * 1000;
+
+    // A função que fará o ping para manter o serviço ativo.
+    const selfPing = async () => {
+        // O Render define esta variável de ambiente com a URL pública do seu serviço.
+        const url = process.env.RENDER_EXTERNAL_URL; 
+        
+        if (url) {
+            try {
+                // Faz a requisição para a rota /ping da própria aplicação.
+                await axios.get(`${url}/ping`); 
+            } catch (err) {
+                console.error('❌ Erro no auto-ping:', err.message);
+            }
+        }
+    };
+    
+    // --- LÓGICA DE INICIALIZAÇÃO ASSÍNCRONA ---
     (async () => {
         await setupDatabase();
+        
         setInterval(limparFrontendUtmsAntigos, 60 * 60 * 1000);
         console.log('🧹 Limpeza de UTMs antigos agendada para cada 1 hora.');
+
+        // Inicia o intervalo do auto-ping.
+        setInterval(selfPing, PING_INTERVALO_MS);
+        console.log(`🔁 Auto-ping configurado para cada ${PING_INTERVALO_MINUTOS} minuto(s).`);
 
         if (!TELEGRAM_SESSION) {
             return console.error("❌ ERRO FATAL: TELEGRAM_SESSION não definida.");
@@ -283,6 +310,7 @@ app.listen(PORT || 3000, () => {
 
         console.log('Iniciando userbot...');
         const client = new TelegramClient(new StringSession(TELEGRAM_SESSION), parseInt(apiId), apiHash, { connectionRetries: 5 });
+        
         try {
             await client.start({
                 phoneNumber: async () => input.text('Digite seu número com DDI: '),
@@ -298,6 +326,7 @@ app.listen(PORT || 3000, () => {
         }
 
         // --- MANIPULAÇÃO DE MENSAGENS ---
+        // CORREÇÃO: Adicionado 'async' para permitir o uso de 'await' dentro do handler.
         client.addEventHandler(async (event) => {
             const message = event.message;
             if (!message || message.chatId.toString() !== CHAT_ID.toString()) {
@@ -333,8 +362,6 @@ app.listen(PORT || 3000, () => {
                 const nomeCompletoRegex = /Nome\s+Completo[:：]?\s*(.+)/i;
                 const emailRegex = /E-mail[:：]?\s*(\S+@\S+\.\S+)/i;
                 const codigoVendaRegex = /Código\s+de\s+Venda[:：]?\s*(.+)/i;
-                
-                // <<< LINHAS FALTANTES ADICIONADAS AQUI >>>
                 const plataformaPagamentoRegex = /Plataforma\s+Pagamento[:：]?\s*(.+)/i;
                 const metodoPagamentoRegex = /M[ée]todo\s+Pagamento[:：]?\s*(.+)/i;
                 
@@ -404,65 +431,62 @@ app.listen(PORT || 3000, () => {
                 let facebook_purchase_sent = false;
 
                 // --- 4. ENVIO PARA UTMIFY ---
-        if (API_KEY) {
-            let trackingParams = {
-                utm_source: null,
-                utm_medium: null,
-                utm_campaign: null,
-                utm_content: null,
-                utm_term: null,
-            };
+                if (API_KEY) {
+                    let trackingParams = {
+                        utm_source: null,
+                        utm_medium: null,
+                        utm_campaign: null,
+                        utm_content: null,
+                        utm_term: null,
+                    };
 
-            // 2. Se encontrarmos dados de clique, preenchemos o objeto.
-            if (matchedFrontendUtms) {
-                console.log(`✅ [BOT] UTMs para ${transaction_id} atribuídas!`);
-                trackingParams.utm_source = matchedFrontendUtms.utm_source || null;
-                trackingParams.utm_medium = matchedFrontendUtms.utm_medium || null;
-                trackingParams.utm_campaign = matchedFrontendUtms.utm_campaign || null;
-                trackingParams.utm_content = matchedFrontendUtms.utm_content || null;
-                trackingParams.utm_term = matchedFrontendUtms.utm_term || null;
-            } else {
-                console.log(`⚠️ [BOT] Nenhuma UTM correspondente encontrada.`);
-            }
+                    if (matchedFrontendUtms) {
+                        trackingParams.utm_source = matchedFrontendUtms.utm_source || null;
+                        trackingParams.utm_medium = matchedFrontendUtms.utm_medium || null;
+                        trackingParams.utm_campaign = matchedFrontendUtms.utm_campaign || null;
+                        trackingParams.utm_content = matchedFrontendUtms.utm_content || null;
+                        trackingParams.utm_term = matchedFrontendUtms.utm_term || null;
+                    } else {
+                        console.log(`⚠️ [BOT] Nenhuma UTM correspondente encontrada.`);
+                    }
 
-            const platform = (texto.match(plataformaPagamentoRegex) || [])[1]?.trim() || 'UnknownPlatform';
-            const paymentMethod = (texto.match(metodoPagamentoRegex) || [])[1]?.trim().toLowerCase().replace(' ', '_') || 'unknown';
-            const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
-            
-            // 3. Montamos o payload final, garantindo que trackingParameters sempre seja um objeto válido.
-            const utmifyPayload = {
-                orderId: transaction_id,
-                platform: platform,
-                paymentMethod: paymentMethod,
-                status: 'paid',
-                createdAt: agoraUtc,
-                approvedDate: agoraUtc,
-                customer: {
-                    name: finalCustomerName,
-                    email: finalCustomerEmail || "naoinformado@utmify.com",
-                    phone: null,
-                    document: finalCustomerDocument,
-                    ip: matchedFrontendUtms?.ip || '0.0.0.0'
-                },
-                products: [{
-                    id: 'acesso-vip-bundle', name: 'Acesso VIP', planId: '', planName: '',
-                    quantity: 1, priceInCents: Math.round(finalValor * 100)
-                }],
-                trackingParameters: trackingParams, // Usamos o objeto sempre válido aqui
-                commission: {
-                    totalPriceInCents: Math.round(finalValor * 100), gatewayFeeInCents: 0,
-                    userCommissionInCents: Math.round(finalValor * 100), currency: 'BRL'
-                },
-                isTest: false
-            };
-            
-            try {
-                const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
-                console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
-            } catch (err) { 
-                console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message); 
-            }
-        }
+                    const platform = (texto.match(plataformaPagamentoRegex) || [])[1]?.trim() || 'UnknownPlatform';
+                    const paymentMethod = (texto.match(metodoPagamentoRegex) || [])[1]?.trim().toLowerCase().replace(' ', '_') || 'unknown';
+                    const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
+                    
+                    const utmifyPayload = {
+                        orderId: transaction_id,
+                        platform: platform,
+                        paymentMethod: paymentMethod,
+                        status: 'paid',
+                        createdAt: agoraUtc,
+                        approvedDate: agoraUtc,
+                        customer: {
+                            name: finalCustomerName,
+                            email: finalCustomerEmail || "naoinformado@utmify.com",
+                            phone: null,
+                            document: finalCustomerDocument,
+                            ip: matchedFrontendUtms?.ip || '0.0.0.0'
+                        },
+                        products: [{
+                            id: 'acesso-vip-bundle', name: 'Acesso VIP', planId: '', planName: '',
+                            quantity: 1, priceInCents: Math.round(finalValor * 100)
+                        }],
+                        trackingParameters: trackingParams,
+                        commission: {
+                            totalPriceInCents: Math.round(finalValor * 100), gatewayFeeInCents: 0,
+                            userCommissionInCents: Math.round(finalValor * 100), currency: 'BRL'
+                        },
+                        isTest: false
+                    };
+                    
+                    try {
+                        const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
+                        console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
+                    } catch (err) { 
+                        console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message); 
+                    }
+                }
 
                 // --- 5. ENVIO PARA FACEBOOK ---
                 if (FACEBOOK_PIXEL_ID && FACEBOOK_API_TOKEN) {
