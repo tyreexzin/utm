@@ -25,9 +25,17 @@ const TELEGRAM_SESSION = process.env.TELEGRAM_SESSION;
 const DATABASE_URL = process.env.DATABASE_URL;
 const PORT = process.env.PORT;
 const API_KEY = process.env.API_KEY; 
-const FACEBOOK_PIXEL_ID = process.env.FACEBOOK_PIXEL_ID;
-const FACEBOOK_API_TOKEN = process.env.FACEBOOK_API_TOKEN;
 const PUSHINPAY_API_TOKEN = process.env.PUSHINPAY_API_TOKEN;
+
+// [ALTERAÇÃO 1]: Variáveis de ambiente para os dois Pixels do Facebook.
+// Lembre-se de adicionar estas variáveis ao seu arquivo .env
+// Pixel Principal
+const FACEBOOK_PIXEL_ID_1 = process.env.FACEBOOK_PIXEL_ID_1;
+const FACEBOOK_API_TOKEN_1 = process.env.FACEBOOK_API_TOKEN_1;
+// Pixel Secundário (para aquecimento)
+const FACEBOOK_PIXEL_ID_2 = process.env.FACEBOOK_PIXEL_ID_2;
+const FACEBOOK_API_TOKEN_2 = process.env.FACEBOOK_API_TOKEN_2;
+
 
 const apiId = 23313993; 
 const apiHash = 'd9249aed345807c04562fb52448a878c'; 
@@ -253,6 +261,40 @@ async function limparFrontendUtmsAntigos() {
         console.error('❌ Erro ao limpar UTMs antigos:', err.message);
     }
 }
+
+// [ALTERAÇÃO 2]: Função reutilizável para enviar eventos para a API de Conversões do Facebook.
+/**
+ * @description Envia um evento para a API de Conversões do Facebook.
+ * @param {string} pixelId - O ID do Pixel do Facebook para o qual o evento será enviado.
+ * @param {string} apiToken - O token de acesso da API de Conversões.
+ * @param {object} payload - O corpo da requisição (payload) contendo os dados do evento.
+ * @param {string} transaction_id - O ID da transação, usado para logs.
+ * @returns {Promise<boolean>} Retorna true se o evento foi enviado com sucesso, caso contrário, false.
+ */
+async function enviarEventoParaFacebook(pixelId, apiToken, payload, transaction_id) {
+    // Verifica se o ID do Pixel e o Token foram fornecidos.
+    if (!pixelId || !apiToken) {
+        console.log(`⚠️  [BOT] Pixel ID ou API Token não configurado. Envio para este pixel será ignorado.`);
+        return false;
+    }
+
+    console.log(`➡️  [BOT] Enviando evento 'Purchase' (ID: ${transaction_id}) para o Pixel ${pixelId}...`);
+
+    try {
+        // Realiza a requisição para a API do Facebook.
+        await axios.post(
+            `https://graph.facebook.com/v19.0/${pixelId}/events?access_token=${apiToken}`,
+            payload
+        );
+        console.log(`✅ [BOT] Evento enviado com sucesso para o Pixel ${pixelId}.`);
+        return true;
+    } catch (err) {
+        // Em caso de erro, exibe uma mensagem detalhada.
+        console.error(`❌ [BOT] Erro ao enviar para o Pixel ${pixelId}:`, err.response?.data?.error || err.message);
+        return false;
+    }
+}
+
 
 // --- ENDPOINTS HTTP ---
 app.post('/frontend-utm-data', (req, res) => {
@@ -488,52 +530,58 @@ app.listen(PORT || 3000, () => {
                     }
                 }
 
-                // --- 5. ENVIO PARA FACEBOOK ---
-                if (FACEBOOK_PIXEL_ID && FACEBOOK_API_TOKEN) {
-                    console.log('➡️  [BOT] Iniciando envio para API de Conversões do Facebook...');
-                    
-                    const nomeCompleto = finalCustomerName.toLowerCase().split(' ');
-                    const primeiroNome = nomeCompleto[0];
-                    const sobrenome = nomeCompleto.length > 1 ? nomeCompleto.slice(1).join(' ') : null;
+                // [ALTERAÇÃO 3]: Bloco de envio para o Facebook modificado para suportar dois Pixels.
+                // --- 5. ENVIO PARA FACEBOOK (MODIFICADO PARA DOIS PIXELS) ---
+                console.log('➡️  [BOT] Iniciando envio para a API de Conversões do Facebook...');
 
-                    const userData = {
-                        fn: [hashData(primeiroNome)],
-                        ln: [hashData(sobrenome)],
-                        external_id: [hashData(finalCustomerDocument)],
-                        client_ip_address: matchedFrontendUtms?.ip,
-                        client_user_agent: matchedFrontendUtms?.user_agent,
-                        fbc: matchedFrontendUtms?.fbc,
-                        fbp: matchedFrontendUtms?.fbp,
-                    };
-                    
-                    Object.keys(userData).forEach(key => {
-                        if (!userData[key] || (Array.isArray(userData[key]) && userData[key].length === 0) || userData[key][0] === null) {
-                            delete userData[key];
-                        }
-                    });
-                    
-                    const facebookPayload = {
-                        data: [{
-                            event_name: 'Purchase',
-                            event_time: message.date,
-                            event_id: transaction_id,
-                            action_source: 'website',
-                            user_data: userData,
-                            custom_data: {
-                                value: finalValor,
-                                currency: 'BRL'
-                            }
-                        }]
-                    };
+                const nomeCompleto = finalCustomerName.toLowerCase().split(' ');
+                const primeiroNome = nomeCompleto[0];
+                const sobrenome = nomeCompleto.length > 1 ? nomeCompleto.slice(1).join(' ') : null;
 
-                    try {
-                        await axios.post(`https://graph.facebook.com/v19.0/${FACEBOOK_PIXEL_ID}/events?access_token=${FACEBOOK_API_TOKEN}`, facebookPayload);
-                        console.log(`✅ [BOT] Evento 'Purchase' (${transaction_id}) enviado para o Facebook.`);
-                        facebook_purchase_sent = true;
-                    } catch (err) {
-                        console.error('❌ [BOT] Erro ao enviar para o Facebook:', err.response?.data?.error || err.message);
+                // --- Preparação dos Dados do Usuário (User Data) ---
+                // Estes dados são comuns para ambos os pixels.
+                const userData = {
+                    fn: [hashData(primeiroNome)],
+                    ln: [hashData(sobrenome)],
+                    external_id: [hashData(finalCustomerDocument)],
+                    client_ip_address: matchedFrontendUtms?.ip,
+                    client_user_agent: matchedFrontendUtms?.user_agent,
+                    fbc: matchedFrontendUtms?.fbc,
+                    fbp: matchedFrontendUtms?.fbp,
+                };
+
+                // Remove campos que não têm valor para otimizar o envio.
+                Object.keys(userData).forEach(key => {
+                    if (!userData[key] || (Array.isArray(userData[key]) && !userData[key][0])) {
+                        delete userData[key];
                     }
-                }
+                });
+
+                // --- Preparação do Payload do Evento ---
+                // Este payload também é comum para ambos os pixels.
+                const facebookPayload = {
+                    data: [{
+                        event_name: 'Purchase',
+                        event_time: message.date,
+                        event_id: transaction_id, // Usar o mesmo event_id ajuda o Facebook a desduplicar eventos se necessário.
+                        action_source: 'website',
+                        user_data: userData,
+                        custom_data: {
+                            value: finalValor,
+                            currency: 'BRL'
+                        }
+                    }]
+                };
+
+                // --- Envio para os Pixels ---
+                // Envia para o primeiro pixel e depois para o segundo.
+                const envioPixel1 = await enviarEventoParaFacebook(FACEBOOK_PIXEL_ID_1, FACEBOOK_API_TOKEN_1, facebookPayload, transaction_id);
+                const envioPixel2 = await enviarEventoParaFacebook(FACEBOOK_PIXEL_ID_2, FACEBOOK_API_TOKEN_2, facebookPayload, transaction_id);
+
+                // Atualiza a flag se pelo menos um dos envios teve sucesso.
+                // Isso é útil para o seu banco de dados saber que a compra foi registrada no Facebook.
+                facebook_purchase_sent = envioPixel1 || envioPixel2;
+
                 
                 // --- 6. SALVAMENTO FINAL NO BANCO ---
                 await salvarVenda({
