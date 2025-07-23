@@ -50,7 +50,7 @@ const CHAT_ID = BigInt(-1002733614113);
 // --- CONFIGURAÇÃO DO BANCO DE DADOS POSTGRESQL ---
 const pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: true }
 });
 
 pool.on('connect', () => {
