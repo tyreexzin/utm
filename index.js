@@ -234,7 +234,7 @@ async function getClick(clickId) {
     }
 }
 
-// 3. Salvar venda
+// 3. Salvar venda (ATUALIZADA)
 async function saveSale(data) {
     const query = `
         INSERT INTO sales (
@@ -247,25 +247,26 @@ async function saveSale(data) {
             status = EXCLUDED.status,
             approved_at = EXCLUDED.approved_at,
             customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
-            customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone)
+            customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
+            plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value)
         RETURNING id;
     `;
 
     const values = [
-        data.sale_code,
+        data.sale_code || `sale_${Date.now()}`,
         data.click_id,
-        data.customer_name,
-        data.customer_email,
+        data.customer_name || 'Cliente Apex',
+        data.customer_email || 'naoinformado@apexvips.com',
         data.customer_phone,
         data.customer_document,
-        data.plan_name,
-        data.plan_value,
+        data.plan_name || 'Plano Apex',
+        data.plan_value || 0,
         data.currency || 'BRL',
-        data.payment_platform,
-        data.payment_method,
-        data.status || 'approved',
-        data.ip,
-        data.user_agent,
+        data.payment_platform || 'apexvips',
+        data.payment_method || 'unknown',
+        'approved',
+        data.ip || '0.0.0.0',
+        data.user_agent || 'ApexVips/1.0',
         data.utm_source,
         data.utm_medium,
         data.utm_campaign,
@@ -579,53 +580,34 @@ async function processPixelEvents(saleData, clickData, isTest = false) {
 // --- ROTAS ---
 
 // Rota 0: Validação do webhook para Apex Vips (GET)
+// Rota 0: Validação GET para Apex Vips
 app.get('/api/webhook/apex', (req, res) => {
     console.log('✅ Validação GET do webhook recebida');
 
-    // Verificar se é um teste da Apex
-    const userAgent = req.headers['user-agent'] || '';
-    const isApexTest = userAgent.includes('Apex') || req.query.test === 'true';
-
-    if (isApexTest) {
-        console.log('🧪 Teste de validação da Apex Vips detectado');
-
-        res.json({
-            status: 'ready',
-            message: 'Webhook configurado corretamente',
-            endpoint: '/api/webhook/apex',
-            method: 'POST',
-            expected_content_type: 'application/json',
-            example_payload: {
-                event: "payment_approved",
-                transaction: {
-                    sale_code: "ORDER_123456",
-                    plan_value: 9700,
-                    currency: "BRL"
-                },
-                customer: {
-                    email: "cliente@exemplo.com",
-                    phone: "11999999999"
-                },
-                tracking: {
-                    utm_source: "facebook",
-                    utm_medium: "cpc",
-                    utm_campaign: "blackfriday"
-                }
+    // Responder no formato que a Apex espera
+    res.json({
+        status: 'active',
+        message: 'Webhook configurado e funcionando',
+        webhook_url: 'https://utm-ujn8.onrender.com/api/webhook/apex',
+        supported_events: ['user_joined', 'payment_created', 'payment_approved'],
+        example_payload: {
+            event: "payment_approved",
+            timestamp: 1732252000,
+            bot_id: 123456789,
+            customer: {
+                chat_id: 987654321,
+                profile_name: "John Doe",
+                phone: "+5511999999999"
             },
-            server_info: {
-                service: 'tracking-api',
-                version: '1.0.0',
-                timestamp: new Date().toISOString()
+            transaction: {
+                sale_code: "SALE-XYZ789",
+                plan_value: 4990,
+                currency: "BRL"
             }
-        });
-    } else {
-        // Resposta padrão para outros GETs
-        res.json({
-            note: "Este endpoint aceita apenas requisições POST",
-            correct_usage: "Envie eventos POST para esta URL",
-            webhook_url: "POST https://utm-ujn8.onrender.com/api/webhook/apex"
-        });
-    }
+        },
+        server_time: new Date().toISOString(),
+        version: "1.0.0"
+    });
 });
 
 // Rota 1: Health Check
@@ -705,83 +687,117 @@ app.get('/pixel.gif', async (req, res) => {
 });
 
 // Rota 4: Webhook da Apex Vips
+// Rota 4: Webhook da Apex Vips (ATUALIZADA)
 app.post('/api/webhook/apex', async (req, res) => {
     console.log('📨 Webhook recebido da Apex Vips');
+    console.log('Body recebido:', JSON.stringify(req.body, null, 2));
 
     try {
         const eventData = req.body;
 
-        // Validar dados básicos
-        if (!eventData.event || !eventData.transaction?.sale_code) {
-            return res.status(400).json({ error: 'Dados inválidos' });
-        }
-
-        // Processar apenas vendas aprovadas
-        if (eventData.event === 'payment_approved') {
-            console.log(`💰 Venda aprovada: ${eventData.transaction.sale_code}`);
-
-            // Buscar click_id associado
-            let clickId = eventData.tracking?.utm_id || eventData.transaction?.sale_code;
-            let clickData = null;
-
-            if (clickId) {
-                clickData = await getClick(clickId);
-            }
-
-            // Preparar dados da venda
-            const saleData = {
-                sale_code: eventData.transaction.sale_code,
-                click_id: clickData?.click_id,
-                customer_name: eventData.customer?.full_name || eventData.customer?.profile_name,
-                customer_email: eventData.customer?.email,
-                customer_phone: eventData.customer?.phone,
-                customer_document: eventData.customer?.tax_id,
-                plan_name: eventData.transaction?.plan_name || 'Acesso VIP',
-                plan_value: eventData.transaction?.plan_value ? (eventData.transaction.plan_value / 100) : 0,
-                currency: eventData.transaction?.currency || 'BRL',
-                payment_platform: eventData.transaction?.payment_platform,
-                payment_method: eventData.transaction?.payment_method,
-                ip: eventData.origin?.ip,
-                user_agent: eventData.origin?.user_agent,
-                utm_source: eventData.tracking?.utm_source,
-                utm_medium: eventData.tracking?.utm_medium,
-                utm_campaign: eventData.tracking?.utm_campaign,
-                utm_content: eventData.tracking?.utm_content,
-                utm_term: eventData.tracking?.utm_term,
-                approved_at: eventData.timestamp
-            };
-
-            // 1. Salvar venda no banco
-            const saveResult = await saveSale(saleData);
-
-            // 2. Enviar eventos para pixels (Facebook, TikTok)
-            const pixelResults = await processPixelEvents(saleData, clickData);
-
-            // 3. Enviar para UTMify (se API key configurada)
-            let utmifyResult = null;
-            if (UTMIFY_API_KEY) {
-                utmifyResult = await sendToUtmify(saleData, clickData);
-            }
-
-            res.json({
-                success: true,
-                message: 'Venda processada',
-                sale_code: saleData.sale_code,
-                saved: saveResult.success,
-                pixels: pixelResults,
-                utmify: utmifyResult
+        // Validar formato da Apex Vips
+        if (!eventData.event || !eventData.bot_id) {
+            console.log('⚠️ Dados inválidos: evento ou bot_id faltando');
+            return res.status(400).json({
+                success: false,
+                error: 'Formato inválido. Evento ou bot_id faltando.'
             });
-
-        } else {
-            // Para outros eventos, apenas confirmar recebimento
-            res.json({ success: true, message: 'Evento recebido' });
         }
+
+        // Responder imediatamente para evitar timeout
+        res.json({
+            success: true,
+            message: 'Webhook recebido com sucesso',
+            event: eventData.event,
+            sale_code: eventData.transaction?.sale_code || 'N/A',
+            received_at: new Date().toISOString()
+        });
+
+        // Processar em segundo plano (assíncrono)
+        setTimeout(async () => {
+            try {
+                // Processar apenas eventos de pagamento
+                if (eventData.event === 'payment_approved' || eventData.event === 'payment_created') {
+                    await processApexEvent(eventData);
+                } else if (eventData.event === 'user_joined') {
+                    console.log('👤 Usuário entrou:', eventData.customer?.profile_name);
+                } else {
+                    console.log(`📝 Evento recebido: ${eventData.event}`);
+                }
+            } catch (error) {
+                console.error('❌ Erro no processamento assíncrono:', error.message);
+            }
+        }, 100);
 
     } catch (error) {
         console.error('❌ Erro no webhook:', error.message);
-        res.status(500).json({ error: 'Erro interno' });
+        // Sempre retornar 200 para a Apex
+        res.status(200).json({
+            success: false,
+            error: 'Erro interno',
+            timestamp: new Date().toISOString()
+        });
     }
 });
+
+// Função para processar eventos da Apex
+async function processApexEvent(eventData) {
+    console.log(`💰 Processando ${eventData.event}: ${eventData.transaction?.sale_code}`);
+
+    // Buscar click_id associado (utm_id)
+    let clickId = eventData.tracking?.utm_id;
+    let clickData = null;
+
+    if (clickId) {
+        clickData = await getClick(clickId);
+        if (clickData) {
+            console.log(`🔗 Click encontrado: ${clickId}`);
+        } else {
+            console.log(`⚠️ Click não encontrado: ${clickId}`);
+        }
+    }
+
+    // Preparar dados da venda no nosso formato
+    const saleData = {
+        sale_code: eventData.transaction?.sale_code || `APEX_${Date.now()}`,
+        click_id: clickData?.click_id,
+        customer_name: eventData.customer?.full_name || eventData.customer?.profile_name,
+        customer_email: eventData.customer?.email || `user_${eventData.customer?.chat_id}@apexvips.com`,
+        customer_phone: eventData.customer?.phone ? eventData.customer.phone.replace(/\D/g, '') : null,
+        customer_document: eventData.customer?.tax_id,
+        plan_name: eventData.transaction?.plan_name || 'Plano Apex',
+        plan_value: eventData.transaction?.plan_value ? (eventData.transaction.plan_value / 100) : 0,
+        currency: eventData.transaction?.currency || 'BRL',
+        payment_platform: eventData.transaction?.payment_platform || 'apexvips',
+        payment_method: eventData.transaction?.payment_method || 'unknown',
+        ip: eventData.origin?.ip,
+        user_agent: eventData.origin?.user_agent,
+        utm_source: eventData.tracking?.utm_source,
+        utm_medium: eventData.tracking?.utm_medium,
+        utm_campaign: eventData.tracking?.utm_campaign,
+        utm_content: eventData.tracking?.utm_content,
+        utm_term: eventData.tracking?.utm_term,
+        approved_at: eventData.timestamp
+    };
+
+    // 1. Salvar venda no banco (apenas se for payment_approved)
+    if (eventData.event === 'payment_approved') {
+        const saveResult = await saveSale(saleData);
+        console.log(`💾 Venda salva: ${saleData.sale_code}`, saveResult.success ? '✅' : '❌');
+
+        // 2. Enviar eventos para pixels
+        if (saveResult.success) {
+            const pixelResults = await processPixelEvents(saleData, clickData);
+            console.log('🎯 Pixels processados:', pixelResults);
+        }
+
+        // 3. Enviar para UTMify
+        if (UTMIFY_API_KEY) {
+            const utmifyResult = await sendToUtmify(saleData, clickData);
+            console.log('🔄 UTMify:', utmifyResult.success ? '✅' : '❌');
+        }
+    }
+}
 
 // Rota 5: Redirecionamento com tracking
 app.get('/redirect', async (req, res) => {
