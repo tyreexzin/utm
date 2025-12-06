@@ -1,628 +1,808 @@
-// --- DEPENDÊNCIAS ---
-const { TelegramClient } = require('telegram');
-const { StringSession } = require('telegram/sessions');
-const { NewMessage } = require('telegram/events');
-const input = require('input');
-const moment = require('moment');
-const axios = require('axios');
+// index.js - Backend Principal com UTMify
 const express = require('express');
+const axios = require('axios');
 const { Pool } = require('pg');
 require('dotenv').config();
-const cors = require('cors');
 const crypto = require('crypto');
 
-// --- CONFIGURAÇÃO DO EXPRESS ---
 const app = express();
 
-app.use(cors({ 
-    origin: '*', 
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', 
-    credentials: true, 
-    optionsSuccessStatus: 204 
-}));
-app.use(express.json());
+// Middleware básico
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-// --- VARIÁVEIS DE AMBIENTE E CONSTANTES ---
-const TELEGRAM_SESSION = process.env.TELEGRAM_SESSION;
+// CORS para aceitar requests de qualquer origem
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    next();
+});
+
+// --- CONFIGURAÇÃO ---
 const DATABASE_URL = process.env.DATABASE_URL;
-const PORT = process.env.PORT;
-const API_KEY = process.env.API_KEY; 
-const PUSHINPAY_API_TOKEN = process.env.PUSHINPAY_API_TOKEN;
+const PORT = process.env.PORT || 3000;
+const TELEGRAM_BOT_URL = process.env.TELEGRAM_BOT_URL || 'https://t.me/seu_bot';
+const UTMIFY_API_KEY = process.env.UTMIFY_API_KEY; // Chave da UTMify
 
-// Variáveis do Facebook
-const FACEBOOK_PIXEL_ID_1 = process.env.FACEBOOK_PIXEL_ID_1;
-const FACEBOOK_API_TOKEN_1 = process.env.FACEBOOK_API_TOKEN_1;
-const FACEBOOK_PIXEL_ID_2 = process.env.FACEBOOK_PIXEL_ID_2;
-const FACEBOOK_API_TOKEN_2 = process.env.FACEBOOK_API_TOKEN_2;
-
-// [NOVO] Variáveis de Ambiente para a API do Google Ads
-const GOOGLE_ADS_DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-const GOOGLE_ADS_LOGIN_CUSTOMER_ID = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID; // ID da sua conta de administrador (MCC), se usar uma
-const GOOGLE_ADS_CUSTOMER_ID = process.env.GOOGLE_ADS_CUSTOMER_ID; // ID da sua conta de anúncios (sem os hifens)
-const GOOGLE_ADS_CONVERSION_ACTION_ID = process.env.GOOGLE_ADS_CONVERSION_ACTION_ID; // ID numérico da Ação de Conversão
-
-// Constantes do Telegram
-const apiId = 23313993; 
-const apiHash = 'd9249aed345807c04562fb52448a878c'; 
-const stringSession = new StringSession(TELEGRAM_SESSION || '');
-const CHAT_ID = BigInt(-1002733614113);
-
-// --- CONFIGURAÇÃO DO BANCO DE DADOS POSTGRESQL ---
+// --- BANCO DE DADOS ---
 const pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: true }
+    ssl: { rejectUnauthorized: false }
 });
 
-pool.on('connect', () => {
-    console.log('✅ PostgreSQL conectado!');
-});
-
-pool.on('error', (err) => {
-    console.error('❌ Erro inesperado no pool do PostgreSQL:', err);
-    process.exit(1);
-});
-
-// --- FUNÇÃO AUXILIAR PARA CRIPTOGRAFIA ---
-function hashData(data) {
-    if (!data) {
-        return null;
-    }
-    const cleanedData = String(data).replace(/[^0-9]/g, '');
-    const hash = crypto.createHash('sha256').update(cleanedData.toLowerCase().trim()).digest('hex');
-    return hash;
-}
-
-// --- FUNÇÕES DO BANCO DE DADOS ---
+// Função para criar tabelas
 async function setupDatabase() {
-    console.log('🔄 Iniciando configuração do banco de dados...');
+    console.log('🔧 Configurando banco de dados...');
+
+    const queries = [
+        // Tabela de cliques
+        `CREATE TABLE IF NOT EXISTS clicks (
+            id SERIAL PRIMARY KEY,
+            click_id TEXT UNIQUE NOT NULL,
+            session_id TEXT,
+            timestamp_ms BIGINT NOT NULL,
+            ip TEXT,
+            user_agent TEXT,
+            referrer TEXT,
+            landing_page TEXT,
+            utm_source TEXT,
+            utm_medium TEXT,
+            utm_campaign TEXT,
+            utm_content TEXT,
+            utm_term TEXT,
+            utm_id TEXT,
+            fbclid TEXT,
+            fbc TEXT,
+            fbp TEXT,
+            ttclid TEXT,
+            gclid TEXT,
+            msclkid TEXT,
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_click_id (click_id),
+            INDEX idx_ttclid (ttclid)
+        )`,
+
+        // Tabela de vendas
+        `CREATE TABLE IF NOT EXISTS sales (
+            id SERIAL PRIMARY KEY,
+            sale_code TEXT UNIQUE NOT NULL,
+            click_id TEXT,
+            customer_name TEXT,
+            customer_email TEXT,
+            customer_phone TEXT,
+            customer_document TEXT,
+            plan_name TEXT,
+            plan_value DECIMAL(10,2),
+            currency TEXT DEFAULT 'BRL',
+            payment_platform TEXT,
+            payment_method TEXT,
+            status TEXT DEFAULT 'pending',
+            ip TEXT,
+            user_agent TEXT,
+            utm_source TEXT,
+            utm_medium TEXT,
+            utm_campaign TEXT,
+            utm_content TEXT,
+            utm_term TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            approved_at TIMESTAMP,
+            facebook_sent BOOLEAN DEFAULT FALSE,
+            tiktok_sent BOOLEAN DEFAULT FALSE,
+            utmify_sent BOOLEAN DEFAULT FALSE,
+            INDEX idx_sale_code (sale_code),
+            INDEX idx_click_id (click_id)
+        )`,
+
+        // Tabela de pixels
+        `CREATE TABLE IF NOT EXISTS pixels (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            pixel_id TEXT NOT NULL,
+            access_token TEXT NOT NULL,
+            test_event_code TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(platform, pixel_id)
+        )`
+    ];
+
     const client = await pool.connect();
     try {
-        const sqlVendas = `
-            CREATE TABLE IF NOT EXISTS vendas (
-                id SERIAL PRIMARY KEY, 
-                chave TEXT UNIQUE NOT NULL, 
-                hash TEXT UNIQUE NOT NULL, 
-                valor REAL NOT NULL, 
-                utm_source TEXT, 
-                utm_medium TEXT, 
-                utm_campaign TEXT, 
-                utm_content TEXT, 
-                utm_term TEXT, 
-                order_id TEXT, 
-                transaction_id TEXT, 
-                ip TEXT, 
-                user_agent TEXT, 
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, 
-                facebook_purchase_sent BOOLEAN DEFAULT FALSE,
-                keyword TEXT,
-                device TEXT,
-                network TEXT
-            );
-        `;
-        await client.query(sqlVendas);
-        console.log('✅ Tabela "vendas" verificada.');
-
-        const sqlFrontendUtms = `
-            CREATE TABLE IF NOT EXISTS frontend_utms (
-                id SERIAL PRIMARY KEY, 
-                unique_click_id TEXT UNIQUE NOT NULL, 
-                timestamp_ms BIGINT NOT NULL, 
-                valor REAL, 
-                gclid TEXT, -- Coluna para o Google Click ID
-                fbclid TEXT, 
-                fbc TEXT, 
-                fbp TEXT, 
-                utm_source TEXT, 
-                utm_medium TEXT, 
-                utm_campaign TEXT, 
-                utm_content TEXT, 
-                utm_term TEXT, 
-                keyword TEXT,
-                device TEXT,
-                network TEXT,
-                ip TEXT, 
-                user_agent TEXT, 
-                received_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `;
-        await client.query(sqlFrontendUtms);
-        console.log('✅ Tabela "frontend_utms" verificada.');
-
-        const sqlTelegramUsers = `
-            CREATE TABLE IF NOT EXISTS telegram_users (
-                telegram_user_id TEXT PRIMARY KEY, 
-                unique_click_id TEXT, 
-                last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, 
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `;
-        await client.query(sqlTelegramUsers);
-        console.log('✅ Tabela "telegram_users" verificada.');
-
-    } catch (err) {
-        console.error('❌ Erro ao configurar tabelas no PostgreSQL:', err.message);
-        process.exit(1);
+        for (const query of queries) {
+            await client.query(query);
+        }
+        console.log('✅ Banco de dados configurado!');
+    } catch (error) {
+        console.error('❌ Erro ao configurar banco:', error.message);
+        throw error;
     } finally {
         client.release();
     }
 }
 
-function gerarChaveUnica({ transaction_id }) { 
-    return `chave-${transaction_id}`; 
+// --- FUNÇÕES AUXILIARES ---
+function hashData(data) {
+    if (!data || typeof data !== 'string') return null;
+    return crypto.createHash('sha256')
+        .update(data.toLowerCase().trim())
+        .digest('hex');
 }
 
-function gerarHash({ transaction_id }) { 
-    return `hash-${transaction_id}`; 
-}
+// --- FUNÇÕES DO BANCO ---
 
-async function salvarVenda(venda) {
-    console.log('💾 Tentando salvar venda no banco (PostgreSQL)...');
-    const sql = `
-        INSERT INTO vendas (
-            chave, hash, valor, utm_source, utm_medium, utm_campaign, utm_content, utm_term, 
-            order_id, transaction_id, ip, user_agent, facebook_purchase_sent,
-            keyword, device, network
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) 
-        ON CONFLICT (hash) DO NOTHING;
+// 1. Salvar clique
+async function saveClick(data) {
+    const query = `
+        INSERT INTO clicks (
+            click_id, session_id, timestamp_ms, ip, user_agent, referrer, landing_page,
+            utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id,
+            fbclid, fbc, fbp, ttclid, gclid, msclkid
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        ON CONFLICT (click_id) DO NOTHING
+        RETURNING id;
     `;
-    const valores = [
-        venda.chave, venda.hash, venda.valor, 
-        venda.utm_source, venda.utm_medium, venda.utm_campaign, venda.utm_content, venda.utm_term, 
-        venda.orderId, venda.transaction_id, 
-        venda.ip, venda.userAgent, 
-        venda.facebook_purchase_sent,
-        venda.keyword, venda.device, venda.network
+
+    const values = [
+        data.click_id,
+        data.session_id || `session_${Date.now()}`,
+        data.timestamp_ms || Date.now(),
+        data.ip,
+        data.user_agent,
+        data.referrer || '',
+        data.landing_page || '',
+        data.utm_source,
+        data.utm_medium,
+        data.utm_campaign,
+        data.utm_content,
+        data.utm_term,
+        data.utm_id,
+        data.fbclid,
+        data.fbc,
+        data.fbp,
+        data.ttclid,
+        data.gclid,
+        data.msclkid
     ];
+
     try {
-        const res = await pool.query(sql, valores);
-        if (res.rowCount > 0) {
-            console.log('✅ Venda salva no PostgreSQL!');
-        } else {
-            console.log('🔁 Venda já existia no PostgreSQL, ignorando inserção (hash duplicado).');
-        }
-    } catch (err) {
-        console.error('❌ Erro ao salvar venda no DB (PostgreSQL):', err.message);
+        const result = await pool.query(query, values);
+        return { success: true, id: result.rows[0]?.id };
+    } catch (error) {
+        console.error('❌ Erro ao salvar clique:', error.message);
+        return { success: false, error: error.message };
     }
 }
 
-async function vendaExiste(hash) {
-    console.log(`🔎 Verificando se venda com hash ${hash} existe no PostgreSQL...`);
-    const sql = 'SELECT COUNT(*) AS total FROM vendas WHERE hash = $1';
+// 2. Buscar clique
+async function getClick(clickId) {
+    const query = 'SELECT * FROM clicks WHERE click_id = $1 LIMIT 1';
     try {
-        const res = await pool.query(sql, [hash]);
-        return res.rows[0].total > 0;
-    } catch (err) {
-        console.error('❌ Erro ao verificar venda existente (PostgreSQL):', err.message);
-        return false;
-    }
-}
-
-async function saveUserClickAssociation(telegramUserId, uniqueClickId) {
-    const sql = `
-        INSERT INTO telegram_users (telegram_user_id, unique_click_id, last_activity) 
-        VALUES ($1, $2, NOW()) 
-        ON CONFLICT (telegram_user_id) DO UPDATE SET 
-            unique_click_id = EXCLUDED.unique_click_id, 
-            last_activity = NOW();
-    `;
-    try {
-        await pool.query(sql, [telegramUserId, uniqueClickId]);
-        console.log(`✅ Associação user_id(${telegramUserId}) -> click_id(${uniqueClickId}) salva no DB.`);
-    } catch (err) {
-        console.error('❌ Erro ao salvar associação user_id-click_id no DB:', err.message);
-    }
-}
-
-async function salvarFrontendUtms(data) {
-    console.log('💾 Tentando salvar UTMs do frontend no banco (PostgreSQL)...');
-    const sql = `
-        INSERT INTO frontend_utms (
-            unique_click_id, timestamp_ms, valor, gclid, fbclid, fbc, fbp, 
-            utm_source, utm_medium, utm_campaign, utm_content, utm_term, 
-            keyword, device, network, ip, user_agent
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);
-    `;
-    const valores = [
-        data.unique_click_id, data.timestamp, data.valor,
-        data.gclid || null,
-        data.fbclid || null, data.fbc || null, data.fbp || null, 
-        data.utm_source || null, data.utm_medium || null, data.utm_campaign || null, 
-        data.utm_content || null, data.utm_term || null, 
-        data.keyword || null, data.device || null, data.network || null,
-        data.ip || null, data.user_agent || null
-    ];
-    try {
-        await pool.query(sql, valores);
-        console.log('✅ UTMs do frontend salvas no PostgreSQL!');
-    } catch (err) {
-        console.error('❌ Erro ao salvar UTMs do frontend no DB (PostgreSQL):', err.message);
-    }
-}
-
-async function buscarUtmsPorUniqueClickId(uniqueClickId) {
-    console.log(`🔎 Buscando UTMs do frontend por unique_click_id: ${uniqueClickId}...`);
-    const sql = 'SELECT * FROM frontend_utms WHERE unique_click_id = $1 ORDER BY received_at DESC LIMIT 1';
-    try {
-        const res = await pool.query(sql, [uniqueClickId]);
-        if (res.rows.length > 0) {
-            console.log(`✅ UTMs encontradas para unique_click_id ${uniqueClickId}.`);
-            return res.rows[0];
-        } else {
-            console.log(`🔎 Nenhuma UTM do frontend encontrada para unique_click_id ${uniqueClickId}.`);
-            return null;
-        }
-    } catch (err) {
-        console.error('❌ Erro ao buscar UTMs por unique_click_id (PostgreSQL):', err.message);
+        const result = await pool.query(query, [clickId]);
+        return result.rows[0] || null;
+    } catch (error) {
+        console.error('❌ Erro ao buscar clique:', error.message);
         return null;
     }
 }
 
-async function limparFrontendUtmsAntigos() {
-    console.log('🧹 Iniciando limpeza de UTMs antigos...');
-    const cutoffTime = moment().subtract(24, 'hours').valueOf();
-    const sql = `DELETE FROM frontend_utms WHERE timestamp_ms < $1`;
+// 3. Salvar venda
+async function saveSale(data) {
+    const query = `
+        INSERT INTO sales (
+            sale_code, click_id, customer_name, customer_email, customer_phone,
+            customer_document, plan_name, plan_value, currency, payment_platform,
+            payment_method, status, ip, user_agent, utm_source, utm_medium,
+            utm_campaign, utm_content, utm_term, approved_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        ON CONFLICT (sale_code) DO UPDATE SET
+            status = EXCLUDED.status,
+            approved_at = EXCLUDED.approved_at,
+            customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
+            customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone)
+        RETURNING id;
+    `;
+
+    const values = [
+        data.sale_code,
+        data.click_id,
+        data.customer_name,
+        data.customer_email,
+        data.customer_phone,
+        data.customer_document,
+        data.plan_name,
+        data.plan_value,
+        data.currency || 'BRL',
+        data.payment_platform,
+        data.payment_method,
+        data.status || 'approved',
+        data.ip,
+        data.user_agent,
+        data.utm_source,
+        data.utm_medium,
+        data.utm_campaign,
+        data.utm_content || '',
+        data.utm_term || '',
+        data.approved_at ? new Date(data.approved_at * 1000) : new Date()
+    ];
+
     try {
-        const res = await pool.query(sql, [cutoffTime]);
-        if (res.rowCount > 0) {
-            console.log(`🧹 Limpeza de UTMs antigos: ${res.rowCount || 0} registros removidos.`);
-        }
-    } catch (err) {
-        console.error('❌ Erro ao limpar UTMs antigos:', err.message);
+        const result = await pool.query(query, values);
+        return { success: true, id: result.rows[0]?.id };
+    } catch (error) {
+        console.error('❌ Erro ao salvar venda:', error.message);
+        return { success: false, error: error.message };
     }
 }
 
-// --- FUNÇÕES DE API EXTERNAS ---
+// 4. Buscar pixels ativos
+async function getActivePixels(platform = null) {
+    let query = 'SELECT * FROM pixels WHERE is_active = TRUE';
+    const values = [];
 
-async function enviarEventoParaFacebook(pixelId, apiToken, payload, transaction_id) {
-    if (!pixelId || !apiToken) {
-        console.log(`⚠️  [BOT] Pixel ID ou API Token não configurado para o Facebook. Envio ignorado.`);
-        return false;
+    if (platform) {
+        query += ' AND platform = $1';
+        values.push(platform);
     }
-    console.log(`➡️  [BOT] Enviando evento 'Purchase' (ID: ${transaction_id}) para o Pixel do Facebook ${pixelId}...`);
+
     try {
-        await axios.post(
-            `https://graph.facebook.com/v20.0/${pixelId}/events?access_token=${apiToken}`,
-            payload
+        const result = await pool.query(query, values);
+        return result.rows;
+    } catch (error) {
+        console.error('❌ Erro ao buscar pixels:', error.message);
+        return [];
+    }
+}
+
+// --- FUNÇÃO UTMIFY ---
+async function sendToUtmify(saleData, clickData) {
+    if (!UTMIFY_API_KEY) {
+        console.log('⚠️ UTMIFY_API_KEY não configurada');
+        return { success: false, error: 'API key não configurada' };
+    }
+
+    try {
+        const now = new Date();
+        const payload = {
+            orderId: saleData.sale_code,
+            platform: saleData.payment_platform || 'unknown',
+            paymentMethod: saleData.payment_method || 'unknown',
+            status: 'paid',
+            createdAt: now.toISOString().replace('T', ' ').substring(0, 19),
+            approvedDate: now.toISOString().replace('T', ' ').substring(0, 19),
+            customer: {
+                name: saleData.customer_name || 'Cliente',
+                email: saleData.customer_email || "naoinformado@utmify.com",
+                phone: saleData.customer_phone || null,
+                document: saleData.customer_document || null,
+                ip: saleData.ip || clickData?.ip || '0.0.0.0'
+            },
+            products: [{
+                id: 'acesso-vip',
+                name: saleData.plan_name || 'Acesso VIP',
+                quantity: 1,
+                priceInCents: Math.round((saleData.plan_value || 0) * 100)
+            }],
+            trackingParameters: {
+                utm_source: saleData.utm_source || clickData?.utm_source,
+                utm_medium: saleData.utm_medium || clickData?.utm_medium,
+                utm_campaign: saleData.utm_campaign || clickData?.utm_campaign,
+                utm_content: saleData.utm_content || clickData?.utm_content,
+                utm_term: saleData.utm_term || clickData?.utm_term
+            },
+            commission: {
+                totalPriceInCents: Math.round((saleData.plan_value || 0) * 100),
+                gatewayFeeInCents: 0,
+                userCommissionInCents: Math.round((saleData.plan_value || 0) * 100),
+                currency: saleData.currency || 'BRL'
+            },
+            isTest: false
+        };
+
+        const response = await axios.post(
+            'https://api.utmify.com.br/api-credentials/orders',
+            payload,
+            {
+                headers: {
+                    'x-api-token': UTMIFY_API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            }
         );
-        console.log(`✅ [BOT] Evento enviado com sucesso para o Pixel do Facebook ${pixelId}.`);
-        return true;
-    } catch (err) {
-        console.error(`❌ [BOT] Erro ao enviar para o Pixel do Facebook ${pixelId}:`, err.response?.data?.error || err.message);
-        return false;
+
+        console.log(`✅ UTMify: Venda ${saleData.sale_code} enviada`);
+
+        // Marcar como enviado no banco
+        await pool.query(
+            'UPDATE sales SET utmify_sent = TRUE WHERE sale_code = $1',
+            [saleData.sale_code]
+        );
+
+        return { success: true, data: response.data };
+
+    } catch (error) {
+        console.error('❌ Erro ao enviar para UTMify:', {
+            status: error.response?.status,
+            data: error.response?.data,
+            message: error.message
+        });
+        return { success: false, error: error.message };
     }
 }
 
-async function enviarConversaoParaGoogleAds(gclid, valor, transaction_id) {
-    if (!gclid) {
-        console.log('⚠️ [BOT] Sem GCLID para esta venda. Conversão do Google não será enviada.');
-        return false;
+// --- FUNÇÕES DE PIXEL ---
+
+// Enviar evento para TikTok
+async function sendTikTokEvent(pixel, eventData, clickData) {
+    const url = 'https://business-api.tiktok.com/open_api/v1.3/pixel/track/';
+
+    // Preparar dados do usuário (hashed)
+    const user = {};
+    if (eventData.customer_email) {
+        user.email = hashData(eventData.customer_email);
     }
-    if (!GOOGLE_ADS_DEVELOPER_TOKEN || !GOOGLE_ADS_CUSTOMER_ID || !GOOGLE_ADS_CONVERSION_ACTION_ID) {
-        console.error('❌ [BOT] Variáveis de ambiente do Google Ads não configuradas. Verifique .env');
-        return false;
+    if (eventData.customer_phone) {
+        user.phone = hashData(eventData.customer_phone.replace(/\D/g, ''));
     }
 
-    console.log(`➡️  [BOT] Enviando conversão para o Google Ads (GCLID: ${gclid})`);
-
-    const url = `https://googleads.googleapis.com/v17/customers/${GOOGLE_ADS_CUSTOMER_ID}/conversionUploads:uploadClickConversions`;
-
+    // Construir payload do TikTok
     const payload = {
-        conversions: [{
-            gclid: gclid,
-            conversionAction: `customers/${GOOGLE_ADS_CUSTOMER_ID}/conversionActions/${GOOGLE_ADS_CONVERSION_ACTION_ID}`,
-            conversionDateTime: moment().format('YYYY-MM-DD HH:mm:ssZ'),
-            conversionValue: valor,
-            currencyCode: 'BRL',
-            orderId: transaction_id
-        }],
-        partialFailure: true,
+        pixel_code: pixel.pixel_id,
+        event: 'CompletePayment',
+        event_id: eventData.sale_code,
+        timestamp: Math.floor(Date.now() / 1000).toString(),
+        context: {
+            ad: clickData?.ttclid ? { callback: clickData.ttclid } : undefined,
+            page: {
+                url: clickData?.landing_page || 'https://tracking.com'
+            },
+            user: {
+                ip: eventData.ip || clickData?.ip || '',
+                user_agent: eventData.user_agent || clickData?.user_agent || ''
+            }
+        },
+        properties: {
+            value: eventData.plan_value || 0,
+            currency: eventData.currency || 'BRL',
+            contents: [{
+                content_id: 'vip_access',
+                content_name: eventData.plan_name || 'Acesso VIP',
+                price: eventData.plan_value || 0,
+                quantity: 1
+            }]
+        }
     };
-    
-    const headers = {
-        'Authorization': `Bearer ${GOOGLE_ADS_DEVELOPER_TOKEN}`, // A API usa o Developer Token como Bearer Token para autenticação
-        'Content-Type': 'application/json',
-        'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN, // O token também é passado aqui
-    };
-    
-    if(GOOGLE_ADS_LOGIN_CUSTOMER_ID) {
-        headers['login-customer-id'] = GOOGLE_ADS_LOGIN_CUSTOMER_ID;
+
+    // Adicionar dados do usuário se existirem
+    if (Object.keys(user).length > 0) {
+        payload.properties.user = user;
+    }
+
+    // Adicionar test event code se existir
+    if (pixel.test_event_code) {
+        payload.test_event_code = pixel.test_event_code;
     }
 
     try {
-        const response = await axios.post(url, payload, { headers });
-        if (response.data.partialFailureError) {
-             console.error(`❌ [BOT] Erro parcial ao enviar conversão para Google Ads:`, response.data.partialFailureError.details);
-             return false;
-        }
-        const result = response.data.results[0];
-        console.log(`✅ [BOT] Conversão enviada com sucesso para o Google Ads.`);
-        return true;
-    } catch (err) {
-        console.error('❌ [BOT] Erro fatal ao enviar conversão para Google Ads:', err.response?.data?.error?.details[0] || err.message);
-        return false;
-    }
-}
-
-
-// --- ENDPOINTS HTTP ---
-app.post('/frontend-utm-data', (req, res) => {
-    console.log('🚀 [BACKEND] Dados do frontend recebidos:', req.body);
-    if (!req.body.unique_click_id || !req.body.timestamp) {
-        return res.status(400).send('unique_click_id e Timestamp são obrigatórios.');
-    }
-    salvarFrontendUtms(req.body);
-    res.status(200).send('Dados recebidos com sucesso!');
-});
-
-app.get('/ping', (req, res) => {
-    console.log(`💚 [PING] Recebida requisição /ping às ${moment().format('HH:mm:ss')}. Serviço está ativo.`);
-    res.status(200).send('Pong!');
-});
-
-
-// --- INICIALIZAÇÃO E LÓGICA PRINCIPAL ---
-app.listen(PORT || 3000, () => {
-    console.log(`🌐 Servidor HTTP Express escutando na porta ${PORT || 3000}.`);
-    
-    const PING_INTERVALO_MINUTOS = 14; 
-    const PING_INTERVALO_MS = PING_INTERVALO_MINUTOS * 60 * 1000;
-
-    const selfPing = async () => {
-        const url = process.env.RENDER_EXTERNAL_URL; 
-        if (url) {
-            try {
-                await axios.get(`${url}/ping`); 
-            } catch (err) {
-                console.error(`❌ Erro no auto-ping às ${moment().format('HH:mm:ss')}:`, err.message);
-            }
-        }
-    };
-    
-    (async () => {
-        await setupDatabase();
-        
-        setInterval(limparFrontendUtmsAntigos, 60 * 60 * 1000);
-        console.log('🧹 Limpeza de UTMs antigos agendada para cada 1 hora.');
-
-        if (process.env.RENDER_EXTERNAL_URL) {
-            setInterval(selfPing, PING_INTERVALO_MS);
-            console.log(`🔁 Auto-ping configurado para cada ${PING_INTERVALO_MINUTOS} minuto(s).`);
-        }
-
-        if (!TELEGRAM_SESSION) {
-            return console.error("❌ ERRO FATAL: TELEGRAM_SESSION não definida.");
-        }
-
-        console.log('Iniciando userbot...');
-        const client = new TelegramClient(new StringSession(TELEGRAM_SESSION), parseInt(apiId), apiHash, { connectionRetries: 5 });
-        
-        try {
-            await client.start({
-                phoneNumber: async () => input.text('Digite seu número com DDI: '),
-                password: async () => input.text('Senha 2FA (se tiver): '),
-                phoneCode: async () => input.text('Código do Telegram: '),
-                onError: (err) => console.log('Erro login:', err),
-            });
-            console.log('✅ Userbot conectado!');
-            const sessionString = client.session.save();
-            if (sessionString !== TELEGRAM_SESSION) {
-                 console.log('🔑 Nova StringSession:', sessionString);
-            }
-        } catch (error) {
-            console.error('❌ Falha ao iniciar o userbot:', error.message);
-            process.exit(1);
-        }
-
-        client.addEventHandler(async (event) => {
-            const message = event.message;
-            if (!message || !message.message || message.chatId.toString() !== CHAT_ID.toString()) {
-                return;
-            }
-
-            let texto = message.message.replace(/\r/g, '').trim();
-            if (texto.startsWith('/start ')) {
-                const startPayload = decodeURIComponent(texto.substring('/start '.length).trim());
-                await saveUserClickAssociation(message.senderId.toString(), startPayload);
-                return;
-            }
-
-            const idMatch = texto.match(/ID\s+Transa(?:ç|c)[aã]o\s+Gateway[:：]?\s*([\w-]+)/i);
-            const valorLiquidoMatch = texto.match(/Valor\s+L[ií]quido[:：]?\s*R?\$?\s*([\d.,]+)/i);
-            
-            if (!idMatch || !valorLiquidoMatch) {
-                return;
-            }
-
-            try {
-                const transaction_id = idMatch[1].trim();
-                const hash = gerarHash({ transaction_id });
-
-                if (await vendaExiste(hash)) {
-                    console.log(`🔁 Venda com hash ${hash} já registrada. Ignorando.`);
-                    return;
-                }
-                
-                console.log(`\n⚡ Nova venda detectada! Processando ID: ${transaction_id}`);
-
-                const nomeCompletoRegex = /Nome\s+Completo[:：]?\s*(.+)/i;
-                const emailRegex = /E-mail[:：]?\s*(\S+@\S+\.\S+)/i;
-                const codigoVendaRegex = /Código\s+de\s+Venda[:：]?\s*(.+)/i;
-                const plataformaPagamentoRegex = /Plataforma\s+Pagamento[:：]?\s*(.+)/i;
-                const metodoPagamentoRegex = /M[ée]todo\s+Pagamento[:：]?\s*(.+)/i;
-                
-                const nomeMatch = texto.match(nomeCompletoRegex);
-                const emailMatch = texto.match(emailRegex);
-                const codigoVendaMatch = texto.match(codigoVendaRegex);
-
-                let nomeDaMensagem = "Cliente Desconhecido";
-                if (nomeMatch && nomeMatch[1]) {
-                    nomeDaMensagem = nomeMatch[1].trim().split('|')[0];
-                }
-                let emailDaMensagem = null;
-                if (emailMatch && emailMatch[1]) {
-                    emailDaMensagem = emailMatch[1].trim();
-                }
-                let valorDaMensagem = 0;
-                if (valorLiquidoMatch && valorLiquidoMatch[1]) {
-                    valorDaMensagem = parseFloat(valorLiquidoMatch[1].replace(/\./g, '').replace(',', '.'));
-                }
-                let codigoVendaDaMensagem = null;
-                if (codigoVendaMatch && codigoVendaMatch[1]) {
-                    codigoVendaDaMensagem = codigoVendaMatch[1].trim();
-                }
-
-                let dadosDaApi = null;
-                if (PUSHINPAY_API_TOKEN) {
-                    console.log(`🔎 Consultando API da Pushinpay para a transação ${transaction_id}...`);
-                    try {
-                        const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction_id}`, {
-                            headers: { 'Authorization': `Bearer ${PUSHINPAY_API_TOKEN}`, 'Accept': 'application/json' }
-                        });
-                        dadosDaApi = response.data;
-                        console.log('✅ Dados da API Pushinpay obtidos com sucesso!');
-                    } catch (apiError) {
-                        console.warn(`⚠️  Não foi possível consultar a API da Pushinpay. Prosseguindo com dados da mensagem.`);
-                    }
-                }
-
-                const finalCustomerName = dadosDaApi?.payer_name || nomeDaMensagem;
-                const finalCustomerEmail = emailDaMensagem;
-                const finalCustomerDocument = dadosDaApi?.payer_national_registration || null;
-                const finalValor = valorDaMensagem;
-                
-                console.log(`  -> Valor Líquido: R$ ${finalValor.toFixed(2)} | Nome Final: ${finalCustomerName}`);
-
-                let matchedFrontendUtms = null;
-                if (codigoVendaDaMensagem) {
-                    matchedFrontendUtms = await buscarUtmsPorUniqueClickId(codigoVendaDaMensagem);
-                }
-                if (matchedFrontendUtms) {
-                    console.log(`✅ [BOT] UTMs e dados do frontend para ${transaction_id} atribuídos!`);
-                }
-
-                // --- Envio para UTMify ---
-                if (API_KEY) {
-                    let trackingParams = {
-                        utm_source: null,
-                        utm_medium: null,
-                        utm_campaign: null,
-                        utm_content: null,
-                        utm_term: null,
-                    };
-
-                    if (matchedFrontendUtms) {
-                        trackingParams.utm_source = matchedFrontendUtms.utm_source || null;
-                        trackingParams.utm_medium = matchedFrontendUtms.utm_medium || null;
-                        trackingParams.utm_campaign = matchedFrontendUtms.utm_campaign || null;
-                        trackingParams.utm_content = matchedFrontendUtms.utm_content || null;
-                        trackingParams.utm_term = matchedFrontendUtms.utm_term || null;
-                    } else {
-                        console.log(`⚠️ [BOT] Nenhuma UTM correspondente encontrada.`);
-                    }
-
-                    const platform = (texto.match(plataformaPagamentoRegex) || [])[1]?.trim() || 'UnknownPlatform';
-                    const paymentMethod = (texto.match(metodoPagamentoRegex) || [])[1]?.trim().toLowerCase().replace(' ', '_') || 'unknown';
-                    const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
-                    
-                    const utmifyPayload = {
-                        orderId: transaction_id,
-                        platform: platform,
-                        paymentMethod: paymentMethod,
-                        status: 'paid',
-                        createdAt: agoraUtc,
-                        approvedDate: agoraUtc,
-                        customer: {
-                            name: finalCustomerName,
-                            email: finalCustomerEmail || "naoinformado@utmify.com",
-                            phone: null,
-                            document: finalCustomerDocument,
-                            ip: matchedFrontendUtms?.ip || '0.0.0.0'
-                        },
-                        products: [{
-                            id: 'acesso-vip-bundle', name: 'Acesso VIP', planId: '', planName: '',
-                            quantity: 1, priceInCents: Math.round(finalValor * 100)
-                        }],
-                        trackingParameters: trackingParams,
-                        commission: {
-                            totalPriceInCents: Math.round(finalValor * 100), gatewayFeeInCents: 0,
-                            userCommissionInCents: Math.round(finalValor * 100), currency: 'BRL'
-                        },
-                        isTest: false
-                    };
-                    
-                    try {
-                        const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
-                        console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
-                    } catch (err) { 
-                        console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message); 
-                    }
-                }
-
-                // --- Envio para Facebook CAPI ---
-                const nomeCompleto = finalCustomerName.toLowerCase().split(' ');
-                const userData = {
-                    fn: [hashData(nomeCompleto[0])],
-                    ln: [hashData(nomeCompleto.length > 1 ? nomeCompleto.slice(1).join(' ') : null)],
-                    external_id: [hashData(finalCustomerDocument)],
-                    client_ip_address: matchedFrontendUtms?.ip,
-                    client_user_agent: matchedFrontendUtms?.user_agent,
-                    fbc: matchedFrontendUtms?.fbc,
-                    fbp: matchedFrontendUtms?.fbp,
-                };
-                Object.keys(userData).forEach(key => (!userData[key] || (Array.isArray(userData[key]) && !userData[key][0])) && delete userData[key]);
-                
-                const customData = {
-                    value: finalValor,
-                    currency: 'BRL',
-                    g_keyword: matchedFrontendUtms?.keyword,
-                    g_device: matchedFrontendUtms?.device,
-                    g_network: matchedFrontendUtms?.network,
-                };
-                Object.keys(customData).forEach(key => (customData[key] === undefined || customData[key] === null) && delete customData[key]);
-                
-                const facebookPayload = {
-                    data: [{
-                        event_name: 'Purchase',
-                        event_time: Math.floor(Date.now() / 1000),
-                        event_id: transaction_id,
-                        action_source: 'website',
-                        user_data: userData,
-                        custom_data: customData
-                    }]
-                };
-
-                const envioPixel1 = await enviarEventoParaFacebook(FACEBOOK_PIXEL_ID_1, FACEBOOK_API_TOKEN_1, facebookPayload, transaction_id);
-                const envioPixel2 = await enviarEventoParaFacebook(FACEBOOK_PIXEL_ID_2, FACEBOOK_API_TOKEN_2, facebookPayload, transaction_id);
-                const facebook_purchase_sent = envioPixel1 || envioPixel2;
-
-                // --- Envio para Google Ads API ---
-                if (matchedFrontendUtms) {
-                    await enviarConversaoParaGoogleAds(matchedFrontendUtms.gclid, finalValor, transaction_id);
-                }
-
-                // --- Salvamento Final no Banco ---
-                await salvarVenda({
-                    chave: gerarChaveUnica({ transaction_id }),
-                    hash: gerarHash({ transaction_id }),
-                    valor: finalValor,
-                    utm_source: matchedFrontendUtms?.utm_source,
-                    utm_medium: matchedFrontendUtms?.utm_medium,
-                    utm_campaign: matchedFrontendUtms?.utm_campaign,
-                    utm_content: matchedFrontendUtms?.utm_content,
-                    utm_term: matchedFrontendUtms?.utm_term,
-                    orderId: transaction_id,
-                    transaction_id: transaction_id,
-                    ip: matchedFrontendUtms?.ip,
-                    userAgent: matchedFrontendUtms?.user_agent,
-                    facebook_purchase_sent: facebook_purchase_sent,
-                    keyword: matchedFrontendUtms?.keyword,
-                    device: matchedFrontendUtms?.device,
-                    network: matchedFrontendUtms?.network
-                });
-
-            } catch (err) {
-                console.error('❌ [BOT] Erro geral ao processar mensagem:', err.message);
+        const response = await axios.post(url, payload, {
+            headers: {
+                'Access-Token': pixel.access_token,
+                'Content-Type': 'application/json'
             }
         });
-    })();
+
+        console.log(`✅ TikTok: Evento enviado para ${eventData.sale_code}`);
+        return { success: true, data: response.data };
+
+    } catch (error) {
+        console.error('❌ TikTok Error:', {
+            status: error.response?.status,
+            data: error.response?.data,
+            message: error.message
+        });
+        return { success: false, error: error.message };
+    }
+}
+
+// Enviar evento para Facebook
+async function sendFacebookEvent(pixel, eventData, clickData) {
+    const url = `https://graph.facebook.com/v19.0/${pixel.pixel_id}/events`;
+
+    // Preparar dados do usuário
+    const userData = {
+        client_ip_address: eventData.ip || clickData?.ip || '',
+        client_user_agent: eventData.user_agent || clickData?.user_agent || '',
+        fbc: clickData?.fbc,
+        fbp: clickData?.fbp
+    };
+
+    if (eventData.customer_email) {
+        userData.em = [hashData(eventData.customer_email)];
+    }
+    if (eventData.customer_phone) {
+        userData.ph = [hashData(eventData.customer_phone.replace(/\D/g, ''))];
+    }
+    if (eventData.customer_document) {
+        userData.external_id = [hashData(eventData.customer_document.replace(/\D/g, ''))];
+    }
+
+    // Remover campos undefined/vazios
+    Object.keys(userData).forEach(key => {
+        if (!userData[key] || (Array.isArray(userData[key]) && userData[key].length === 0)) {
+            delete userData[key];
+        }
+    });
+
+    const payload = {
+        data: [{
+            event_name: 'Purchase',
+            event_time: Math.floor(Date.now() / 1000),
+            event_id: eventData.sale_code,
+            action_source: 'website',
+            user_data: userData,
+            custom_data: {
+                value: eventData.plan_value || 0,
+                currency: eventData.currency || 'BRL'
+            }
+        }],
+        access_token: pixel.access_token
+    };
+
+    try {
+        const response = await axios.post(url, payload);
+        console.log(`✅ Facebook: Evento enviado para ${eventData.sale_code}`);
+        return { success: true, data: response.data };
+    } catch (error) {
+        console.error('❌ Facebook Error:', error.response?.data || error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+// Processar eventos de pixel após venda
+async function processPixelEvents(saleData, clickData) {
+    const pixels = await getActivePixels();
+
+    const results = [];
+    for (const pixel of pixels) {
+        try {
+            let result;
+
+            if (pixel.platform === 'tiktok') {
+                result = await sendTikTokEvent(pixel, saleData, clickData);
+            } else if (pixel.platform === 'facebook') {
+                result = await sendFacebookEvent(pixel, saleData, clickData);
+            }
+
+            // Atualizar status na venda
+            if (result?.success) {
+                const column = pixel.platform === 'tiktok' ? 'tiktok_sent' : 'facebook_sent';
+                await pool.query(
+                    `UPDATE sales SET ${column} = TRUE WHERE sale_code = $1`,
+                    [saleData.sale_code]
+                );
+            }
+
+            results.push({
+                platform: pixel.platform,
+                success: result?.success || false,
+                error: result?.error
+            });
+
+        } catch (error) {
+            console.error(`❌ Erro ao processar pixel ${pixel.platform}:`, error.message);
+            results.push({ platform: pixel.platform, success: false, error: error.message });
+        }
+    }
+
+    return results;
+}
+
+// --- ROTAS ---
+
+// Rota 1: Health Check (para Render)
+app.get('/', (req, res) => {
+    res.json({
+        status: 'online',
+        service: 'tracking-api',
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        features: ['tracking', 'webhooks', 'pixels', 'utmify']
+    });
 });
+
+// Rota 2: Receber cliques do frontend
+app.post('/api/track', async (req, res) => {
+    try {
+        const data = req.body;
+
+        if (!data.click_id) {
+            return res.status(400).json({ error: 'click_id é obrigatório' });
+        }
+
+        // Adicionar IP
+        data.ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+        // Salvar no banco
+        const result = await saveClick(data);
+
+        res.json({
+            success: true,
+            click_id: data.click_id,
+            saved: result.success
+        });
+
+    } catch (error) {
+        console.error('❌ Erro em /api/track:', error.message);
+        res.status(500).json({ error: 'Erro interno' });
+    }
+});
+
+// Rota 3: Pixel GIF para tracking simples
+app.get('/pixel.gif', async (req, res) => {
+    try {
+        // Coletar dados da query
+        const clickData = {
+            click_id: req.query.click_id || `pixel_${Date.now()}`,
+            timestamp_ms: Date.now(),
+            ip: req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress,
+            user_agent: req.headers['user-agent'],
+            referrer: req.headers['referer'] || req.headers['referrer'],
+            utm_source: req.query.utm_source || req.query.us,
+            utm_medium: req.query.utm_medium || req.query.um,
+            utm_campaign: req.query.utm_campaign || req.query.uc,
+            fbclid: req.query.fbclid,
+            ttclid: req.query.ttclid,
+            gclid: req.query.gclid
+        };
+
+        // Salvar assincronamente
+        saveClick(clickData).catch(console.error);
+
+        // Retornar GIF 1x1 transparente
+        const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+        res.writeHead(200, {
+            'Content-Type': 'image/gif',
+            'Content-Length': pixel.length,
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
+        });
+        res.end(pixel);
+
+    } catch (error) {
+        // Sempre retornar o pixel
+        const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+        res.writeHead(200, { 'Content-Type': 'image/gif' });
+        res.end(pixel);
+    }
+});
+
+// Rota 4: Webhook da Apex Vips
+app.post('/api/webhook/apex', async (req, res) => {
+    console.log('📨 Webhook recebido da Apex Vips');
+
+    try {
+        const eventData = req.body;
+
+        // Validar dados básicos
+        if (!eventData.event || !eventData.transaction?.sale_code) {
+            return res.status(400).json({ error: 'Dados inválidos' });
+        }
+
+        // Processar apenas vendas aprovadas
+        if (eventData.event === 'payment_approved') {
+            console.log(`💰 Venda aprovada: ${eventData.transaction.sale_code}`);
+
+            // Buscar click_id associado
+            let clickId = eventData.tracking?.utm_id || eventData.transaction?.sale_code;
+            let clickData = null;
+
+            if (clickId) {
+                clickData = await getClick(clickId);
+            }
+
+            // Preparar dados da venda
+            const saleData = {
+                sale_code: eventData.transaction.sale_code,
+                click_id: clickData?.click_id,
+                customer_name: eventData.customer?.full_name || eventData.customer?.profile_name,
+                customer_email: eventData.customer?.email,
+                customer_phone: eventData.customer?.phone,
+                customer_document: eventData.customer?.tax_id,
+                plan_name: eventData.transaction?.plan_name || 'Acesso VIP',
+                plan_value: eventData.transaction?.plan_value ? (eventData.transaction.plan_value / 100) : 0,
+                currency: eventData.transaction?.currency || 'BRL',
+                payment_platform: eventData.transaction?.payment_platform,
+                payment_method: eventData.transaction?.payment_method,
+                ip: eventData.origin?.ip,
+                user_agent: eventData.origin?.user_agent,
+                utm_source: eventData.tracking?.utm_source,
+                utm_medium: eventData.tracking?.utm_medium,
+                utm_campaign: eventData.tracking?.utm_campaign,
+                utm_content: eventData.tracking?.utm_content,
+                utm_term: eventData.tracking?.utm_term,
+                approved_at: eventData.timestamp
+            };
+
+            // 1. Salvar venda no banco
+            const saveResult = await saveSale(saleData);
+
+            // 2. Enviar eventos para pixels (Facebook, TikTok)
+            const pixelResults = await processPixelEvents(saleData, clickData);
+
+            // 3. Enviar para UTMify (se API key configurada)
+            let utmifyResult = null;
+            if (UTMIFY_API_KEY) {
+                utmifyResult = await sendToUtmify(saleData, clickData);
+            }
+
+            res.json({
+                success: true,
+                message: 'Venda processada',
+                sale_code: saleData.sale_code,
+                saved: saveResult.success,
+                pixels: pixelResults,
+                utmify: utmifyResult
+            });
+
+        } else {
+            // Para outros eventos, apenas confirmar recebimento
+            res.json({ success: true, message: 'Evento recebido' });
+        }
+
+    } catch (error) {
+        console.error('❌ Erro no webhook:', error.message);
+        res.status(500).json({ error: 'Erro interno' });
+    }
+});
+
+// Rota 5: Redirecionamento com tracking
+app.get('/redirect', async (req, res) => {
+    try {
+        const { click_id, url, ...params } = req.query;
+
+        // URL de destino (Telegram por padrão)
+        let destination = url || TELEGRAM_BOT_URL;
+
+        // Se for Telegram, adicionar click_id como parâmetro start
+        if ((destination.includes('t.me') || destination.includes('telegram.me')) && click_id) {
+            const urlObj = new URL(destination);
+            urlObj.searchParams.set('start', click_id);
+            destination = urlObj.toString();
+        }
+
+        // Registrar o clique
+        if (click_id) {
+            const clickData = {
+                click_id,
+                timestamp_ms: Date.now(),
+                ip: req.ip || req.headers['x-forwarded-for'],
+                user_agent: req.headers['user-agent'],
+                referrer: req.headers['referer'] || req.headers['referrer'],
+                utm_source: params.utm_source || params.us,
+                utm_medium: params.utm_medium || params.um,
+                utm_campaign: params.utm_campaign || params.uc,
+                ttclid: params.ttclid,
+                fbclid: params.fbclid
+            };
+
+            saveClick(clickData).catch(console.error);
+        }
+
+        // Redirecionar imediatamente
+        res.redirect(302, destination);
+
+    } catch (error) {
+        console.error('❌ Erro no redirect:', error.message);
+        res.redirect(302, TELEGRAM_BOT_URL);
+    }
+});
+
+// --- ROTAS DE ADMIN ---
+
+// Listar pixels
+app.get('/admin/pixels', async (req, res) => {
+    try {
+        const pixels = await getActivePixels();
+        res.json(pixels);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Adicionar/atualizar pixel
+app.post('/admin/pixels', async (req, res) => {
+    try {
+        const { name, platform, pixel_id, access_token, test_event_code } = req.body;
+
+        if (!name || !platform || !pixel_id || !access_token) {
+            return res.status(400).json({ error: 'Dados incompletos' });
+        }
+
+        const query = `
+            INSERT INTO pixels (name, platform, pixel_id, access_token, test_event_code)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (platform, pixel_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                access_token = EXCLUDED.access_token,
+                test_event_code = EXCLUDED.test_event_code,
+                is_active = TRUE
+            RETURNING *;
+        `;
+
+        const result = await pool.query(query, [
+            name, platform, pixel_id, access_token, test_event_code || null
+        ]);
+
+        res.json({ success: true, pixel: result.rows[0] });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Estatísticas
+app.get('/admin/stats', async (req, res) => {
+    try {
+        const [clicks, sales, revenue, pixels] = await Promise.all([
+            pool.query('SELECT COUNT(*) as count FROM clicks'),
+            pool.query('SELECT COUNT(*) as count FROM sales WHERE status = $1', ['approved']),
+            pool.query('SELECT SUM(plan_value) as total FROM sales WHERE status = $1', ['approved']),
+            pool.query('SELECT COUNT(*) as count FROM pixels WHERE is_active = TRUE')
+        ]);
+
+        res.json({
+            clicks: parseInt(clicks.rows[0].count),
+            sales: parseInt(sales.rows[0].count),
+            revenue: parseFloat(revenue.rows[0].total || 0).toFixed(2),
+            active_pixels: parseInt(pixels.rows[0].count),
+            utmify_configured: !!UTMIFY_API_KEY
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- INICIALIZAÇÃO ---
+async function startServer() {
+    try {
+        // Configurar banco
+        await setupDatabase();
+
+        // Auto-ping para manter Render ativo
+        if (process.env.RENDER_EXTERNAL_URL) {
+            setInterval(async () => {
+                try {
+                    await axios.get(`${process.env.RENDER_EXTERNAL_URL}/`);
+                    console.log('💚 Auto-ping executado');
+                } catch (error) {
+                    console.error('❌ Auto-ping falhou:', error.message);
+                }
+            }, 5 * 60 * 1000); // 5 minutos
+        }
+
+        // Iniciar servidor
+        app.listen(PORT, () => {
+            console.log(`
+🚀 Servidor iniciado na porta ${PORT}
+🌐 URL: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}
+🔑 UTMify: ${UTMIFY_API_KEY ? '✅ Configurada' : '❌ Não configurada'}
+📊 Endpoints:
+   GET  /                   - Health check
+   POST /api/track          - Receber cliques
+   GET  /pixel.gif          - Pixel tracking
+   POST /api/webhook/apex   - Webhook Apex Vips
+   GET  /redirect           - Redirecionamento
+   GET  /admin/pixels       - Listar pixels
+   POST /admin/pixels       - Adicionar pixel
+   GET  /admin/stats        - Estatísticas
+            `);
+        });
+
+    } catch (error) {
+        console.error('❌ Falha ao iniciar servidor:', error);
+        process.exit(1);
+    }
+}
+
+startServer();
