@@ -785,6 +785,88 @@ app.get('/admin/pixels', async (req, res) => {
     }
 });
 
+// Deletar pixel
+app.delete('/admin/pixels/:id', async (req, res) => {
+    try {
+        const pixelId = parseInt(req.params.id);
+
+        if (isNaN(pixelId) || pixelId <= 0) {
+            return res.status(400).json({ error: 'ID inválido' });
+        }
+
+        // Verificar se o pixel existe
+        const checkResult = await pool.query(
+            'SELECT * FROM pixels WHERE id = $1',
+            [pixelId]
+        );
+
+        if (checkResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Pixel não encontrado' });
+        }
+
+        // Soft delete (marcar como inativo) - preferível para manter histórico
+        const result = await pool.query(
+            'UPDATE pixels SET is_active = FALSE WHERE id = $1 RETURNING *',
+            [pixelId]
+        );
+
+        // OU para deletar permanentemente:
+        // const result = await pool.query(
+        //     'DELETE FROM pixels WHERE id = $1 RETURNING *',
+        //     [pixelId]
+        // );
+
+        console.log(`🗑️ Pixel deletado: ${result.rows[0].name} (${result.rows[0].platform})`);
+
+        res.json({
+            success: true,
+            message: 'Pixel deletado com sucesso',
+            pixel: result.rows[0]
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao deletar pixel:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Rota alternativa para múltipla exclusão
+app.post('/admin/pixels/delete', async (req, res) => {
+    try {
+        const { ids } = req.body;
+
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ error: 'IDs inválidos' });
+        }
+
+        // Converter para números
+        const pixelIds = ids.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
+
+        if (pixelIds.length === 0) {
+            return res.status(400).json({ error: 'Nenhum ID válido fornecido' });
+        }
+
+        // Soft delete
+        const result = await pool.query(
+            'UPDATE pixels SET is_active = FALSE WHERE id = ANY($1) RETURNING *',
+            [pixelIds]
+        );
+
+        console.log(`🗑️ ${result.rowCount} pixels deletados`);
+
+        res.json({
+            success: true,
+            message: `${result.rowCount} pixel(s) deletado(s) com sucesso`,
+            deleted_count: result.rowCount,
+            pixels: result.rows
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao deletar múltiplos pixels:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Adicionar/atualizar pixel
 app.post('/admin/pixels', async (req, res) => {
     try {
