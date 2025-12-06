@@ -1,4 +1,4 @@
-// index.js - Backend Principal com UTMify (Sintaxe SQL Corrigida)
+// index.js - Backend Principal com UTMify e Pixels Atualizados
 const express = require('express');
 const axios = require('axios');
 const { Pool } = require('pg');
@@ -109,7 +109,7 @@ async function setupDatabase() {
             name TEXT NOT NULL,
             platform TEXT NOT NULL,
             pixel_id TEXT NOT NULL,
-            event_source_id TEXT,  // NOVO CAMPO
+            event_source_id TEXT,
             access_token TEXT NOT NULL,
             test_event_code TEXT,
             is_active BOOLEAN DEFAULT TRUE,
@@ -293,30 +293,30 @@ async function sendToUtmify(saleData, clickData) {
         const now = new Date();
         const payload = {
             orderId: saleData.sale_code,
-            platform: saleData.payment_platform || 'unknown',
-            paymentMethod: saleData.payment_method || 'unknown',
+            platform: saleData.payment_platform || 'Hotmart',
+            paymentMethod: saleData.payment_method || 'credit_card',
             status: 'paid',
             createdAt: now.toISOString().replace('T', ' ').substring(0, 19),
             approvedDate: now.toISOString().replace('T', ' ').substring(0, 19),
             customer: {
                 name: saleData.customer_name || 'Cliente',
                 email: saleData.customer_email || "naoinformado@utmify.com",
-                phone: saleData.customer_phone || null,
-                document: saleData.customer_document || null,
+                phone: saleData.customer_phone ? saleData.customer_phone.replace(/\D/g, '') : null,
+                document: saleData.customer_document ? saleData.customer_document.replace(/\D/g, '') : null,
                 ip: saleData.ip || clickData?.ip || '0.0.0.0'
             },
             products: [{
-                id: 'acesso-vip',
+                id: 'vip-access',
                 name: saleData.plan_name || 'Acesso VIP',
                 quantity: 1,
                 priceInCents: Math.round((saleData.plan_value || 0) * 100)
             }],
             trackingParameters: {
-                utm_source: saleData.utm_source || clickData?.utm_source,
-                utm_medium: saleData.utm_medium || clickData?.utm_medium,
-                utm_campaign: saleData.utm_campaign || clickData?.utm_campaign,
-                utm_content: saleData.utm_content || clickData?.utm_content,
-                utm_term: saleData.utm_term || clickData?.utm_term
+                utm_source: saleData.utm_source || clickData?.utm_source || 'direct',
+                utm_medium: saleData.utm_medium || clickData?.utm_medium || 'organic',
+                utm_campaign: saleData.utm_campaign || clickData?.utm_campaign || 'default',
+                utm_content: saleData.utm_content || clickData?.utm_content || '',
+                utm_term: saleData.utm_term || clickData?.utm_term || ''
             },
             commission: {
                 totalPriceInCents: Math.round((saleData.plan_value || 0) * 100),
@@ -324,8 +324,11 @@ async function sendToUtmify(saleData, clickData) {
                 userCommissionInCents: Math.round((saleData.plan_value || 0) * 100),
                 currency: saleData.currency || 'BRL'
             },
-            isTest: false
+            isTest: saleData.sale_code.includes('TEST') || false
         };
+
+        // Log para debug
+        console.log('📤 Enviando para UTMify:', JSON.stringify(payload, null, 2));
 
         const response = await axios.post(
             'https://api.utmify.com.br/api-credentials/orders',
@@ -334,11 +337,12 @@ async function sendToUtmify(saleData, clickData) {
                 headers: {
                     'x-api-token': UTMIFY_API_KEY,
                     'Content-Type': 'application/json'
-                }
+                },
+                timeout: 10000
             }
         );
 
-        console.log(`✅ UTMify: Venda ${saleData.sale_code} enviada`);
+        console.log(`✅ UTMify: Venda ${saleData.sale_code} enviada`, response.data);
 
         // Marcar como enviado no banco
         await pool.query(
@@ -352,7 +356,8 @@ async function sendToUtmify(saleData, clickData) {
         console.error('❌ Erro ao enviar para UTMify:', {
             status: error.response?.status,
             data: error.response?.data,
-            message: error.message
+            message: error.message,
+            config: error.config?.data
         });
         return { success: false, error: error.message };
     }
@@ -361,7 +366,7 @@ async function sendToUtmify(saleData, clickData) {
 // --- FUNÇÕES DE PIXEL ---
 
 // Enviar evento para TikTok (API v1.3 atualizada)
-async function sendTikTokEvent(pixel, eventData, clickData) {
+async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
     const url = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 
     // Preparar dados do usuário (hashed)
@@ -424,9 +429,9 @@ async function sendTikTokEvent(pixel, eventData, clickData) {
     // Remover campos undefined
     const cleanPayload = JSON.parse(JSON.stringify(payload));
 
-    // Adicionar test_event_code se existir
-    if (pixel.test_event_code) {
-        cleanPayload.test_event_code = pixel.test_event_code;
+    // Adicionar test_event_code se existir OU se for teste manual
+    if (pixel.test_event_code || isTest) {
+        cleanPayload.test_event_code = pixel.test_event_code || 'TEST54815';
     }
 
     try {
@@ -457,7 +462,7 @@ async function sendTikTokEvent(pixel, eventData, clickData) {
 }
 
 // Enviar evento para Facebook
-async function sendFacebookEvent(pixel, eventData, clickData) {
+async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
     const url = `https://graph.facebook.com/v19.0/${pixel.pixel_id}/events`;
 
     // Preparar dados do usuário
@@ -497,7 +502,8 @@ async function sendFacebookEvent(pixel, eventData, clickData) {
                 currency: eventData.currency || 'BRL'
             }
         }],
-        access_token: pixel.access_token
+        access_token: pixel.access_token,
+        test_event_code: isTest ? 'TEST54815' : pixel.test_event_code
     };
 
     try {
@@ -511,7 +517,7 @@ async function sendFacebookEvent(pixel, eventData, clickData) {
 }
 
 // Processar eventos de pixel após venda
-async function processPixelEvents(saleData, clickData) {
+async function processPixelEvents(saleData, clickData, isTest = false) {
     const pixels = await getActivePixels();
 
     const results = [];
@@ -520,13 +526,13 @@ async function processPixelEvents(saleData, clickData) {
             let result;
 
             if (pixel.platform === 'tiktok') {
-                result = await sendTikTokEvent(pixel, saleData, clickData);
+                result = await sendTikTokEvent(pixel, saleData, clickData, isTest);
             } else if (pixel.platform === 'facebook') {
-                result = await sendFacebookEvent(pixel, saleData, clickData);
+                result = await sendFacebookEvent(pixel, saleData, clickData, isTest);
             }
 
-            // Atualizar status na venda
-            if (result?.success) {
+            // Atualizar status na venda (apenas se não for teste)
+            if (result?.success && !isTest) {
                 const column = pixel.platform === 'tiktok' ? 'tiktok_sent' : 'facebook_sent';
                 await pool.query(
                     `UPDATE sales SET ${column} = TRUE WHERE sale_code = $1`,
@@ -537,12 +543,13 @@ async function processPixelEvents(saleData, clickData) {
             results.push({
                 platform: pixel.platform,
                 success: result?.success || false,
-                error: result?.error
+                error: result?.error,
+                test_mode: isTest
             });
 
         } catch (error) {
             console.error(`❌ Erro ao processar pixel ${pixel.platform}:`, error.message);
-            results.push({ platform: pixel.platform, success: false, error: error.message });
+            results.push({ platform: pixel.platform, success: false, error: error.message, test_mode: isTest });
         }
     }
 
@@ -778,7 +785,7 @@ app.get('/admin/pixels', async (req, res) => {
     }
 });
 
-// Atualize a rota POST /admin/pixels
+// Adicionar/atualizar pixel
 app.post('/admin/pixels', async (req, res) => {
     try {
         const { name, platform, pixel_id, event_source_id, access_token, test_event_code } = req.body;
@@ -800,7 +807,7 @@ app.post('/admin/pixels', async (req, res) => {
         `;
 
         const result = await pool.query(query, [
-            name, platform, pixel_id, event_source_id || pixel_id, // Usa pixel_id como fallback
+            name, platform, pixel_id, event_source_id || pixel_id,
             access_token, test_event_code || null
         ]);
 
@@ -831,6 +838,118 @@ app.get('/admin/stats', async (req, res) => {
 
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+// Rota 6: Teste manual da API de eventos (para usar no admin.html)
+app.post('/api/test/events', async (req, res) => {
+    try {
+        const {
+            platform,
+            pixel_id,
+            test_event_code = 'TEST54815',
+            customer_email,
+            customer_phone,
+            plan_value = 97.00,
+            ...otherParams
+        } = req.body;
+
+        console.log('🧪 Teste manual da API de eventos recebido');
+
+        // Verificar se é teste de pixel específico
+        let pixels;
+        if (platform && pixel_id) {
+            pixels = await pool.query(
+                'SELECT * FROM pixels WHERE platform = $1 AND pixel_id = $2 AND is_active = TRUE',
+                [platform, pixel_id]
+            );
+            pixels = pixels.rows;
+        } else if (platform) {
+            pixels = await getActivePixels(platform);
+        } else {
+            pixels = await getActivePixels();
+        }
+
+        if (!pixels || pixels.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Nenhum pixel ativo encontrado',
+                hint: 'Configure pixels em /admin/pixels primeiro'
+            });
+        }
+
+        const testData = {
+            sale_code: `TEST_${Date.now()}`,
+            customer_email: customer_email || 'test@example.com',
+            customer_phone: customer_phone || '11999999999',
+            customer_document: '12345678900',
+            customer_name: 'Cliente Teste',
+            plan_name: 'Acesso VIP Teste',
+            plan_value: plan_value,
+            currency: 'BRL',
+            utm_source: 'test_source',
+            utm_medium: 'test_medium',
+            utm_campaign: 'test_campaign',
+            utm_term: 'teste manual',
+            ip: req.ip || '189.45.210.130',
+            user_agent: req.headers['user-agent'] || 'Test-API/1.0'
+        };
+
+        const clickData = {
+            landing_page: 'https://teste.tracking.com',
+            referrer: 'https://facebook.com/test',
+            ttclid: 'test_ttclid_123',
+            fbclid: 'test_fbclid_456'
+        };
+
+        const results = [];
+        for (const pixel of pixels) {
+            try {
+                let result;
+
+                if (pixel.platform === 'tiktok') {
+                    result = await sendTikTokEvent(pixel, testData, clickData, true);
+                } else if (pixel.platform === 'facebook') {
+                    result = await sendFacebookEvent(pixel, testData, clickData, true);
+                }
+
+                results.push({
+                    platform: pixel.platform,
+                    pixel_id: pixel.pixel_id,
+                    name: pixel.name,
+                    test_event_code: pixel.test_event_code || test_event_code,
+                    success: result?.success || false,
+                    data: result?.data,
+                    error: result?.error
+                });
+
+            } catch (error) {
+                console.error(`❌ Erro no teste do pixel ${pixel.platform}:`, error.message);
+                results.push({
+                    platform: pixel.platform,
+                    pixel_id: pixel.pixel_id,
+                    name: pixel.name,
+                    success: false,
+                    error: error.message,
+                    response: error.response?.data
+                });
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Teste de eventos executado',
+            test_data: testData,
+            test_event_code: test_event_code,
+            results: results
+        });
+
+    } catch (error) {
+        console.error('❌ Erro no teste de eventos:', error.message);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
     }
 });
 
@@ -891,6 +1010,7 @@ async function startServer() {
    GET  /pixel.gif          - Pixel tracking
    POST /api/webhook/apex   - Webhook Apex Vips
    GET  /redirect           - Redirecionamento
+   POST /api/test/events    - Testar API de eventos (para admin.html)
    GET  /admin/pixels       - Listar pixels
    POST /admin/pixels       - Adicionar pixel
    GET  /admin/stats        - Estatísticas
