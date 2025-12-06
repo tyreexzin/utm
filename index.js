@@ -580,20 +580,52 @@ async function processPixelEvents(saleData, clickData, isTest = false) {
 
 // Rota 0: Validação do webhook para Apex Vips (GET)
 app.get('/api/webhook/apex', (req, res) => {
-    console.log('✅ Validação do webhook (GET) recebida da Apex');
-    res.json({
-        status: 'webhook_ready',
-        message: 'Webhook configurado corretamente',
-        method: 'POST',
-        endpoint: '/api/webhook/apex',
-        expected_format: {
-            event: 'payment_approved',
-            transaction: { sale_code: '...', plan_value: 9700 },
-            customer: { email: '...', phone: '...' },
-            tracking: { utm_source: '...', utm_campaign: '...' }
-        },
-        timestamp: new Date().toISOString()
-    });
+    console.log('✅ Validação GET do webhook recebida');
+
+    // Verificar se é um teste da Apex
+    const userAgent = req.headers['user-agent'] || '';
+    const isApexTest = userAgent.includes('Apex') || req.query.test === 'true';
+
+    if (isApexTest) {
+        console.log('🧪 Teste de validação da Apex Vips detectado');
+
+        res.json({
+            status: 'ready',
+            message: 'Webhook configurado corretamente',
+            endpoint: '/api/webhook/apex',
+            method: 'POST',
+            expected_content_type: 'application/json',
+            example_payload: {
+                event: "payment_approved",
+                transaction: {
+                    sale_code: "ORDER_123456",
+                    plan_value: 9700,
+                    currency: "BRL"
+                },
+                customer: {
+                    email: "cliente@exemplo.com",
+                    phone: "11999999999"
+                },
+                tracking: {
+                    utm_source: "facebook",
+                    utm_medium: "cpc",
+                    utm_campaign: "blackfriday"
+                }
+            },
+            server_info: {
+                service: 'tracking-api',
+                version: '1.0.0',
+                timestamp: new Date().toISOString()
+            }
+        });
+    } else {
+        // Resposta padrão para outros GETs
+        res.json({
+            note: "Este endpoint aceita apenas requisições POST",
+            correct_usage: "Envie eventos POST para esta URL",
+            webhook_url: "POST https://utm-ujn8.onrender.com/api/webhook/apex"
+        });
+    }
 });
 
 // Rota 1: Health Check
