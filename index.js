@@ -109,6 +109,7 @@ async function setupDatabase() {
             name TEXT NOT NULL,
             platform TEXT NOT NULL,
             pixel_id TEXT NOT NULL,
+            event_source_id TEXT,  // NOVO CAMPO
             access_token TEXT NOT NULL,
             test_event_code TEXT,
             is_active BOOLEAN DEFAULT TRUE,
@@ -359,9 +360,9 @@ async function sendToUtmify(saleData, clickData) {
 
 // --- FUNÇÕES DE PIXEL ---
 
-// Enviar evento para TikTok
+// Enviar evento para TikTok (API v1.3 atualizada)
 async function sendTikTokEvent(pixel, eventData, clickData) {
-    const url = 'https://business-api.tiktok.com/open_api/v1.3/pixel/track/';
+    const url = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 
     // Preparar dados do usuário (hashed)
     const user = {};
@@ -371,61 +372,85 @@ async function sendTikTokEvent(pixel, eventData, clickData) {
     if (eventData.customer_phone) {
         user.phone = hashData(eventData.customer_phone.replace(/\D/g, ''));
     }
-
-    // Construir payload do TikTok
-    const payload = {
-        pixel_code: pixel.pixel_id,
-        event: 'CompletePayment',
-        event_id: eventData.sale_code,
-        timestamp: Math.floor(Date.now() / 1000).toString(),
-        context: {
-            ad: clickData?.ttclid ? { callback: clickData.ttclid } : undefined,
-            page: {
-                url: clickData?.landing_page || 'https://tracking.com'
-            },
-            user: {
-                ip: eventData.ip || clickData?.ip || '',
-                user_agent: eventData.user_agent || clickData?.user_agent || ''
-            }
-        },
-        properties: {
-            value: eventData.plan_value || 0,
-            currency: eventData.currency || 'BRL',
-            contents: [{
-                content_id: 'vip_access',
-                content_name: eventData.plan_name || 'Acesso VIP',
-                price: eventData.plan_value || 0,
-                quantity: 1
-            }]
-        }
-    };
-
-    // Adicionar dados do usuário se existirem
-    if (Object.keys(user).length > 0) {
-        payload.properties.user = user;
+    if (eventData.customer_document) {
+        user.external_id = hashData(eventData.customer_document.replace(/\D/g, ''));
     }
 
-    // Adicionar test event code se existir
+    // Determinar content_type baseado no plan_name
+    let content_type = 'product';
+    if (eventData.plan_name) {
+        const planLower = eventData.plan_name.toLowerCase();
+        if (planLower.includes('curso') || planLower.includes('treinamento') || planLower.includes('mentoria')) {
+            content_type = 'course';
+        } else if (planLower.includes('consultoria') || planLower.includes('serviço') || planLower.includes('service')) {
+            content_type = 'service';
+        } else if (planLower.includes('assinatura') || planLower.includes('subscription')) {
+            content_type = 'subscription';
+        }
+    }
+
+    // Construir payload conforme documentação do TikTok
+    const payload = {
+        event_source: "web",
+        event_source_id: pixel.event_source_id || pixel.pixel_id,
+        data: [
+            {
+                event: "Purchase",
+                event_time: Math.floor(Date.now() / 1000),
+                event_id: eventData.sale_code,
+                user: Object.keys(user).length > 0 ? user : undefined,
+                properties: {
+                    value: eventData.plan_value || 0,
+                    currency: eventData.currency || 'BRL',
+                    content_id: 'vip_access',
+                    content_type: content_type,
+                    content_name: eventData.plan_name || 'Acesso VIP',
+                    query: eventData.utm_term || ''
+                },
+                page: {
+                    url: clickData?.landing_page || 'https://tracking.com',
+                    referrer: clickData?.referrer || ''
+                },
+                // Adicionar parâmetros de contexto se disponíveis
+                context: clickData?.ttclid ? {
+                    ad: {
+                        callback: clickData.ttclid
+                    }
+                } : undefined
+            }
+        ]
+    };
+
+    // Remover campos undefined
+    const cleanPayload = JSON.parse(JSON.stringify(payload));
+
+    // Adicionar test_event_code se existir
     if (pixel.test_event_code) {
-        payload.test_event_code = pixel.test_event_code;
+        cleanPayload.test_event_code = pixel.test_event_code;
     }
 
     try {
-        const response = await axios.post(url, payload, {
+        console.log('📤 Enviando para TikTok:', JSON.stringify(cleanPayload, null, 2));
+
+        const response = await axios.post(url, cleanPayload, {
             headers: {
                 'Access-Token': pixel.access_token,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 10000
         });
 
-        console.log(`✅ TikTok: Evento enviado para ${eventData.sale_code}`);
+        console.log(`✅ TikTok: Evento Purchase enviado para ${eventData.sale_code}`);
+        console.log('Resposta TikTok:', JSON.stringify(response.data, null, 2));
+
         return { success: true, data: response.data };
 
     } catch (error) {
         console.error('❌ TikTok Error:', {
             status: error.response?.status,
             data: error.response?.data,
-            message: error.message
+            message: error.message,
+            config: error.config?.data
         });
         return { success: false, error: error.message };
     }
@@ -753,20 +778,21 @@ app.get('/admin/pixels', async (req, res) => {
     }
 });
 
-// Adicionar/atualizar pixel
+// Atualize a rota POST /admin/pixels
 app.post('/admin/pixels', async (req, res) => {
     try {
-        const { name, platform, pixel_id, access_token, test_event_code } = req.body;
+        const { name, platform, pixel_id, event_source_id, access_token, test_event_code } = req.body;
 
         if (!name || !platform || !pixel_id || !access_token) {
             return res.status(400).json({ error: 'Dados incompletos' });
         }
 
         const query = `
-            INSERT INTO pixels (name, platform, pixel_id, access_token, test_event_code)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO pixels (name, platform, pixel_id, event_source_id, access_token, test_event_code)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (platform, pixel_id) DO UPDATE SET
                 name = EXCLUDED.name,
+                event_source_id = EXCLUDED.event_source_id,
                 access_token = EXCLUDED.access_token,
                 test_event_code = EXCLUDED.test_event_code,
                 is_active = TRUE
@@ -774,7 +800,8 @@ app.post('/admin/pixels', async (req, res) => {
         `;
 
         const result = await pool.query(query, [
-            name, platform, pixel_id, access_token, test_event_code || null
+            name, platform, pixel_id, event_source_id || pixel_id, // Usa pixel_id como fallback
+            access_token, test_event_code || null
         ]);
 
         res.json({ success: true, pixel: result.rows[0] });
