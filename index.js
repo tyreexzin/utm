@@ -13,9 +13,29 @@ app.use(express.urlencoded({ extended: true }));
 
 // CORS para aceitar requests de qualquer origem
 app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    const allowedOrigins = [
+        '*',
+        'http://127.0.0.1:5500',
+        'http://localhost:5500',
+        'http://localhost:3000',
+        'https://utm-ujn8.onrender.com',
+        'https://lelelinksbr.shop'
+    ];
+
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+        res.header('Access-Control-Allow-Origin', origin || '*');
+    }
+
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+
+    // Handle preflight
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+
     next();
 });
 
