@@ -1654,6 +1654,7 @@ async function startServer() {
 🌐 URL: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}
 🔑 UTMify: ${UTMIFY_API_KEY ? '✅ Configurada' : '❌ Não configurada'}
 🤖 Telegram: ${TELEGRAM_BOT_URL}
+🖥️ Criador: @gustavo.mcruz
 📊 Endpoints:
    GET  /                   - Health check
    GET  /test               - Teste rápido
