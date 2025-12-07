@@ -1436,28 +1436,20 @@ app.post('/admin/resend-utmify', async (req, res) => {
         if (!UTMIFY_API_KEY) {
             return res.status(400).json({
                 success: false,
-                error: 'UTMIFY_API_KEY não configurada. Configure antes de reenviar vendas.'
+                error: 'UTMIFY_API_KEY não configurada.'
             });
         }
 
-        // Montar query base
+        // Buscar vendas
         let query = 'SELECT * FROM sales';
-        const params = [];
-
-        if (only_missing) {
-            query += ' WHERE utmify_sent = FALSE';
-        }
-
+        if (only_missing) query += ' WHERE utmify_sent = FALSE';
         query += ' ORDER BY created_at ASC';
+        if (limit && Number.isInteger(limit)) query += ` LIMIT ${limit}`;
 
-        if (limit && Number.isInteger(limit)) {
-            query += ` LIMIT ${limit}`;
-        }
-
-        const result = await pool.query(query, params);
+        const result = await pool.query(query);
         const sales = result.rows;
 
-        console.log(`\n🔄 Reprocessando ${sales.length} venda(s) para UTMify (only_missing=${only_missing})`);
+        console.log(`\n🔄 Reenviando ${sales.length} vendas para a UTMify...`);
 
         const summary = {
             total: sales.length,
@@ -1468,84 +1460,97 @@ app.post('/admin/resend-utmify', async (req, res) => {
 
         for (const sale of sales) {
             try {
-                // Buscar click associado (se houver)
+                // Buscar click associado
                 let clickData = null;
                 if (sale.click_id) {
                     const clickRes = await pool.query(
                         'SELECT * FROM clicks WHERE click_id = $1 LIMIT 1',
                         [sale.click_id]
                     );
-                    if (clickRes.rows.length > 0) {
-                        clickData = clickRes.rows[0];
-                    }
+                    if (clickRes.rows.length > 0) clickData = clickRes.rows[0];
                 }
 
-                // Montar saleData no formato esperado pelo sendToUtmify
+                // Função para formatar datas
+                const formatDate = (d) =>
+                    new Date(d).toISOString().replace("T", " ").substring(0, 19);
+
+                // Definir status UTMify
+                let utmifyStatus = "waiting_payment";
+                if (sale.status === "approved") {
+                    utmifyStatus = "paid";
+                }
+
+                // Montar saleData completo
                 const saleData = {
                     sale_code: sale.sale_code,
                     click_id: sale.click_id,
 
-                    customer_name: sale.customer_name || 'Cliente',
-                    customer_email: sale.customer_email || 'naoinformado@utmify.com',
+                    customer_name: sale.customer_name,
+                    customer_email: sale.customer_email,
                     customer_phone: sale.customer_phone,
                     customer_document: sale.customer_document,
 
-                    plan_name: sale.plan_name || 'Plano',
-                    plan_value: parseFloat(sale.plan_value || 0),
-                    currency: sale.currency || 'BRL',
-                    payment_platform: sale.payment_platform || 'ApexVips',
-                    payment_method: sale.payment_method || 'unknown',
+                    plan_name: sale.plan_name,
+                    plan_value: parseFloat(sale.plan_value) || 0,
+                    currency: sale.currency,
+                    payment_platform: sale.payment_platform,
+                    payment_method: sale.payment_method,
 
-                    ip: sale.ip || clickData?.ip || '0.0.0.0',
-                    user_agent: sale.user_agent || 'Reprocess/1.0',
+                    ip: sale.ip || clickData?.ip || "0.0.0.0",
+                    user_agent: sale.user_agent || "Reprocess/1.0",
 
-                    utm_source: sale.utm_source || clickData?.utm_source,
-                    utm_medium: sale.utm_medium || clickData?.utm_medium,
-                    utm_campaign: sale.utm_campaign || clickData?.utm_campaign,
-                    utm_content: sale.utm_content || clickData?.utm_content || '',
-                    utm_term: sale.utm_term || clickData?.utm_term || '',
+                    utm_source: sale.utm_source || clickData?.utm_source || null,
+                    utm_medium: sale.utm_medium || clickData?.utm_medium || null,
+                    utm_campaign: sale.utm_campaign || clickData?.utm_campaign || null,
+                    utm_content: sale.utm_content || clickData?.utm_content || "",
+                    utm_term: sale.utm_term || clickData?.utm_term || "",
 
-                    status: sale.status || 'created',
-                    approved_at: sale.approved_at
-                        ? Math.floor(new Date(sale.approved_at).getTime() / 1000)
-                        : null
+                    status: utmifyStatus,
+
+                    // DATAS CORRETAS PARA A UTMIFY
+                    createdAt: sale.created_at
+                        ? formatDate(sale.created_at)
+                        : formatDate(new Date()),
+
+                    approvedDate:
+                        sale.status === "approved" && sale.approved_at
+                            ? formatDate(sale.approved_at)
+                            : null
                 };
 
+                // Enviar pra UTMify
                 const utmResult = await sendToUtmify(saleData, clickData);
 
                 summary.details.push({
                     sale_code: sale.sale_code,
                     status: sale.status,
-                    utmify_status: utmResult.success ? 'success' : 'failed',
-                    error: utmResult.success ? null : utmResult.error || null
+                    utmify_status: utmResult.success ? "success" : "failed",
+                    error: utmResult.success ? null : utmResult.error
                 });
 
-                if (utmResult.success) {
-                    summary.success += 1;
-                } else {
-                    summary.failed += 1;
-                }
+                if (utmResult.success) summary.success++;
+                else summary.failed++;
 
-            } catch (innerError) {
-                console.error('❌ Erro ao reenviar venda para UTMify:', innerError.message);
-                summary.failed += 1;
+            } catch (inner) {
+                console.error("❌ Erro interno:", inner.message);
+                summary.failed++;
                 summary.details.push({
                     sale_code: sale.sale_code,
                     status: sale.status,
-                    utmify_status: 'failed',
-                    error: innerError.message
+                    utmify_status: "failed",
+                    error: inner.message
                 });
             }
         }
 
         res.json({
             success: true,
-            message: 'Reprocessamento de vendas finalizado',
+            message: "Reprocessamento finalizado",
             report: summary
         });
 
     } catch (error) {
-        console.error('❌ Erro em /admin/resend-utmify:', error.message);
+        console.error("❌ Erro geral:", error.message);
         res.status(500).json({
             success: false,
             error: error.message
