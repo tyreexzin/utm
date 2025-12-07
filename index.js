@@ -304,6 +304,7 @@ async function getActivePixels(platform = null) {
 }
 
 // --- FUNÇÃO UTMIFY ---
+// --- FUNÇÃO UTMIFY ---
 async function sendToUtmify(saleData, clickData) {
     if (!UTMIFY_API_KEY) {
         console.log('⚠️ UTMIFY_API_KEY não configurada');
@@ -312,7 +313,6 @@ async function sendToUtmify(saleData, clickData) {
 
     try {
         const now = new Date();
-        // CORREÇÃO: Só marcar como teste se realmente for um teste
         const isTest = saleData.sale_code.includes('TEST') || false;
 
         // Status correto para UTMify
@@ -329,6 +329,29 @@ async function sendToUtmify(saleData, clickData) {
                 .replace(/^-|-$/g, '')
                 .substring(0, 50)
             : 'apex-access';
+
+        // Determinar UTM parameters - usar clickData se disponível, senão usar saleData
+        const utmSource = saleData.utm_source || clickData?.utm_source || 'direct';
+        const utmMedium = saleData.utm_medium || clickData?.utm_medium || 'organic';
+        const utmCampaign = saleData.utm_campaign || clickData?.utm_campaign || 'default';
+        const utmContent = saleData.utm_content || clickData?.utm_content || '';
+        const utmTerm = saleData.utm_term || clickData?.utm_term || '';
+
+        console.log('📊 DETALHES DO ENVIO UTMIFY:');
+        console.log('- Venda:', saleData.sale_code);
+        console.log('- Cliente:', saleData.customer_name);
+        console.log('- Valor:', saleData.plan_value);
+        console.log('- Status UTMify:', utmifyStatus);
+        console.log('- É teste?', isTest);
+        console.log('📊 PARÂMETROS DE TRACKING:');
+        console.log('- UTM Source:', utmSource);
+        console.log('- UTM Medium:', utmMedium);
+        console.log('- UTM Campaign:', utmCampaign);
+        console.log('- UTM Content:', utmContent);
+        console.log('- UTM Term:', utmTerm);
+        console.log('- Click ID associado:', clickData?.click_id || 'Nenhum');
+        console.log('- Landing Page original:', clickData?.landing_page || 'Não disponível');
+        console.log('- Referrer:', clickData?.referrer || 'Não disponível');
 
         const payload = {
             orderId: saleData.sale_code,
@@ -355,11 +378,11 @@ async function sendToUtmify(saleData, clickData) {
                 priceInCents: Math.round((saleData.plan_value || 0) * 100)
             }],
             trackingParameters: {
-                utm_source: saleData.utm_source || clickData?.utm_source || 'direct',
-                utm_medium: saleData.utm_medium || clickData?.utm_medium || 'organic',
-                utm_campaign: saleData.utm_campaign || clickData?.utm_campaign || 'default',
-                utm_content: saleData.utm_content || clickData?.utm_content || '',
-                utm_term: saleData.utm_term || clickData?.utm_term || ''
+                utm_source: utmSource,
+                utm_medium: utmMedium,
+                utm_campaign: utmCampaign,
+                utm_content: utmContent,
+                utm_term: utmTerm
             },
             commission: {
                 totalPriceInCents: Math.round((saleData.plan_value || 0) * 100),
@@ -945,9 +968,105 @@ app.post('/api/webhook/apex', async (req, res) => {
     }
 });
 
-// Função para processar eventos da Apex (ATUALIZADA)
+// Função para verificar UTM parameters no banco
+async function checkUtmForSale(saleCode, clickId) {
+    try {
+        let query = `SELECT 
+                sale_code,
+                click_id,
+                utm_source,
+                utm_medium,
+                utm_campaign,
+                utm_content,
+                utm_term
+            FROM sales 
+            WHERE sale_code = $1`;
+
+        const result = await pool.query(query, [saleCode]);
+
+        if (result.rows.length > 0) {
+            const data = result.rows[0];
+
+            // Se tiver click_id, buscar dados do click também
+            if (data.click_id) {
+                const clickResult = await pool.query(
+                    `SELECT 
+                        click_id,
+                        utm_source as click_utm_source,
+                        utm_medium as click_utm_medium,
+                        utm_campaign as click_utm_campaign,
+                        utm_content as click_utm_content,
+                        utm_term as click_utm_term,
+                        landing_page,
+                        referrer,
+                        ttclid,
+                        fbclid,
+                        gclid
+                    FROM clicks 
+                    WHERE click_id = $1`,
+                    [data.click_id]
+                );
+
+                if (clickResult.rows.length > 0) {
+                    const clickData = clickResult.rows[0];
+                    return {
+                        sale_data: data,
+                        click_data: clickData
+                    };
+                }
+            }
+
+            return {
+                sale_data: data,
+                click_data: null
+            };
+        }
+        return null;
+    } catch (error) {
+        console.error('❌ Erro ao verificar UTM:', error.message);
+        return null;
+    }
+}
+
+// Função para processar eventos da Apex (ATUALIZADA COM LOGS MELHORADOS)
 async function processApexEvent(eventData) {
-    console.log(`💰 Processando ${eventData.event}: ${eventData.transaction?.sale_code}`);
+    console.log(`\n💰💰💰 PROCESSANDO ${eventData.event.toUpperCase()} 💰💰💰`);
+    console.log('══════════════════════════════════════════════════════════════');
+
+    // Log completo do que veio da Apex
+    console.log('📨 DADOS RECEBIDOS DA APEX VIPS:');
+    console.log('├─ Evento:', eventData.event);
+    console.log('├─ Sale Code:', eventData.transaction?.sale_code || 'N/A');
+    console.log('├─ Bot ID:', eventData.bot_id);
+    console.log('├─ Timestamp:', new Date(eventData.timestamp * 1000).toISOString());
+
+    console.log('├─ Tracking Data:');
+    console.log('│  ├─ UTM Source:', eventData.tracking?.utm_source || 'null');
+    console.log('│  ├─ UTM Medium:', eventData.tracking?.utm_medium || 'null');
+    console.log('│  ├─ UTM Campaign:', eventData.tracking?.utm_campaign || 'null');
+    console.log('│  ├─ UTM Content:', eventData.tracking?.utm_content || 'null');
+    console.log('│  ├─ UTM Term:', eventData.tracking?.utm_term || 'null');
+    console.log('│  └─ UTM ID (click_id):', eventData.tracking?.utm_id || 'null');
+
+    console.log('├─ Transaction Data:');
+    console.log('│  ├─ Plan:', eventData.transaction?.plan_name || 'N/A');
+    console.log('│  ├─ Value:', eventData.transaction?.plan_value ? `R$ ${(eventData.transaction.plan_value / 100).toFixed(2)}` : 'N/A');
+    console.log('│  ├─ Platform:', eventData.transaction?.payment_platform || 'N/A');
+    console.log('│  └─ Method:', eventData.transaction?.payment_method || 'N/A');
+
+    console.log('├─ Customer Data:');
+    console.log('│  ├─ Name:', eventData.customer?.profile_name || 'N/A');
+    console.log('│  ├─ Chat ID:', eventData.customer?.chat_id || 'N/A');
+    console.log('│  ├─ Phone:', eventData.customer?.phone || 'N/A');
+    console.log('│  └─ Email:', eventData.customer?.email || 'N/A');
+
+    console.log('└─ Origin Data:');
+    console.log('   ├─ IP:', eventData.origin?.ip || 'null');
+    console.log('   ├─ User Agent:', eventData.origin?.user_agent || 'null');
+    console.log('   ├─ Country:', eventData.origin?.country || 'null');
+    console.log('   └─ City:', eventData.origin?.city || 'null');
+
+    console.log('══════════════════════════════════════════════════════════════\n');
 
     // Criar sale_code se não existir
     let saleCode = eventData.transaction?.sale_code;
@@ -956,7 +1075,7 @@ async function processApexEvent(eventData) {
         saleCode = eventData.transaction?.external_transaction_id ||
             eventData.transaction?.internal_transaction_id ||
             `APEX_${eventData.timestamp}`;
-        console.log(`📝 Gerado sale_code: ${saleCode}`);
+        console.log(`📝 Sale Code gerado: ${saleCode}`);
     }
 
     // Buscar click_id associado (utm_id)
@@ -964,12 +1083,57 @@ async function processApexEvent(eventData) {
     let clickData = null;
 
     if (clickId) {
+        console.log(`🔍 BUSCANDO CLICK NO BANCO DE DADOS:`);
+        console.log(`   Click ID/UTM ID recebido: "${clickId}"`);
+
         clickData = await getClick(clickId);
+
         if (clickData) {
-            console.log(`🔗 Click encontrado: ${clickId}`);
+            console.log(`✅ CLICK ENCONTRADO NO BANCO!`);
+            console.log('📊 DETALHES DO CLICK SALVO:');
+            console.log('├─ UTM Parameters do click:');
+            console.log('│  ├─ Source:', clickData.utm_source || '(não capturado)');
+            console.log('│  ├─ Medium:', clickData.utm_medium || '(não capturado)');
+            console.log('│  ├─ Campaign:', clickData.utm_campaign || '(não capturado)');
+            console.log('│  ├─ Content:', clickData.utm_content || '(não capturado)');
+            console.log('│  └─ Term:', clickData.utm_term || '(não capturado)');
+            console.log('├─ Technical Data:');
+            console.log('│  ├─ Landing Page:', clickData.landing_page || '(não capturado)');
+            console.log('│  ├─ Referrer:', clickData.referrer || '(não capturado)');
+            console.log('│  ├─ IP:', clickData.ip || '(não capturado)');
+            console.log('│  └─ User Agent:', clickData.user_agent ? clickData.user_agent.substring(0, 50) + '...' : '(não capturado)');
+            console.log('└─ Platform IDs:');
+            console.log('   ├─ TTCLID (TikTok):', clickData.ttclid || '(não capturado)');
+            console.log('   ├─ FBCLID (Facebook):', clickData.fbclid || '(não capturado)');
+            console.log('   ├─ GCLID (Google):', clickData.gclid || '(não capturado)');
+            console.log('   ├─ FBC (Facebook):', clickData.fbc || '(não capturado)');
+            console.log('   └─ FBP (Facebook):', clickData.fbp || '(não capturado)');
+            console.log(`📅 Click recebido em: ${clickData.received_at}`);
         } else {
-            console.log(`⚠️ Click não encontrado: ${clickId}`);
+            console.log(`⚠️ CLICK NÃO ENCONTRADO no banco de dados para ID: "${clickId}"`);
+            console.log(`💡 Possíveis causas:`);
+            console.log(`   - O click ainda não foi registrado no sistema`);
+            console.log(`   - O click_id/utm_id está diferente do registrado`);
+            console.log(`   - Problema na captura do click inicial`);
+
+            // Tentar buscar por UTM ID (pode ser diferente do click_id)
+            if (clickId.includes('utm_') || clickId.includes('click_')) {
+                console.log(`🔍 Tentando buscar por UTM ID similar...`);
+                const similarResult = await pool.query(
+                    "SELECT click_id, utm_source, utm_campaign FROM clicks WHERE utm_id = $1 OR click_id LIKE $2 LIMIT 1",
+                    [clickId, `%${clickId}%`]
+                );
+
+                if (similarResult.rows.length > 0) {
+                    console.log(`🔗 Click similar encontrado: ${similarResult.rows[0].click_id}`);
+                    clickData = similarResult.rows[0];
+                }
+            }
         }
+    } else {
+        console.log('⚠️ NENHUM CLICK_ID/UTM_ID recebido da Apex Vips');
+        console.log('💡 O sistema Apex não está enviando o utm_id no webhook');
+        console.log('💡 Verifique a configuração do bot da Apex para enviar parâmetros de tracking');
     }
 
     // Preparar dados da venda no nosso formato
@@ -1008,20 +1172,128 @@ async function processApexEvent(eventData) {
     // 1. Salvar venda no banco
     saleData.status = saveStatus;
     const saveResult = await saveSale(saleData);
-    console.log(`💾 Venda salva: ${saleData.sale_code} (${saveStatus})`, saveResult.success ? '✅' : '❌');
+
+    console.log('\n💾 SALVANDO VENDA NO BANCO:');
+    console.log(`├─ Sale Code: ${saleData.sale_code}`);
+    console.log(`├─ Status: ${saveStatus}`);
+    console.log(`├─ Click ID associado: ${saleData.click_id || 'Nenhum'}`);
+    console.log(`└─ Resultado: ${saveResult.success ? '✅ SUCESSO' : '❌ FALHA'}`);
+
+    if (!saveResult.success) {
+        console.log(`⚠️ Erro ao salvar venda: ${saveResult.error}`);
+    }
+
+    console.log('\n🎯 PARÂMETROS DE TRACKING QUE SERÃO UTILIZADOS:');
+    console.log('├─ UTM Source:', saleData.utm_source || clickData?.utm_source || 'direct (fallback)');
+    console.log('├─ UTM Medium:', saleData.utm_medium || clickData?.utm_medium || 'organic (fallback)');
+    console.log('├─ UTM Campaign:', saleData.utm_campaign || clickData?.utm_campaign || 'default (fallback)');
+    console.log('├─ UTM Content:', saleData.utm_content || clickData?.utm_content || '(vazio)');
+    console.log('└─ UTM Term:', saleData.utm_term || clickData?.utm_term || '(vazio)');
+
+    console.log('\n🔗 ORIGEM DO TRAFFIC:');
+    if (clickData?.landing_page) {
+        console.log(`├─ Landing Page: ${clickData.landing_page}`);
+        // Extrair parâmetros da URL se disponível
+        try {
+            const url = new URL(clickData.landing_page);
+            console.log(`├─ URL Base: ${url.origin}${url.pathname}`);
+            if (url.search) {
+                console.log(`├─ Query Parameters: ${url.search}`);
+            }
+        } catch (e) {
+            console.log(`├─ URL: ${clickData.landing_page}`);
+        }
+    } else {
+        console.log('├─ Landing Page: Não disponível');
+    }
+    console.log(`└─ Referrer: ${clickData?.referrer || 'Não disponível'}`);
+
+    // Verificar UTM parameters no banco após salvar
+    console.log('\n🔍 VERIFICANDO UTM PARAMETERS SALVOS NO BANCO:');
+    const utmCheck = await checkUtmForSale(saleData.sale_code, saleData.click_id);
+    if (utmCheck) {
+        console.log('✅ Dados encontrados no banco:');
+        console.log('├─ Na tabela sales:');
+        console.log('│  ├─ UTM Source:', utmCheck.sale_data.utm_source || '(vazio)');
+        console.log('│  ├─ UTM Campaign:', utmCheck.sale_data.utm_campaign || '(vazio)');
+        console.log('│  └─ UTM Medium:', utmCheck.sale_data.utm_medium || '(vazio)');
+
+        if (utmCheck.click_data) {
+            console.log('├─ Na tabela clicks:');
+            console.log('│  ├─ UTM Source:', utmCheck.click_data.click_utm_source || '(vazio)');
+            console.log('│  ├─ UTM Campaign:', utmCheck.click_data.click_utm_campaign || '(vazio)');
+            console.log('│  ├─ Landing Page:', utmCheck.click_data.landing_page || '(vazio)');
+            console.log('│  └─ TTCLID:', utmCheck.click_data.ttclid || '(não capturado)');
+        } else {
+            console.log('├─ Tabela clicks: Nenhum click associado encontrado');
+        }
+    } else {
+        console.log('⚠️ Dados não encontrados no banco após salvar');
+    }
 
     // 2. Enviar para UTMify (se API key configurada e evento de pagamento)
     if (UTMIFY_API_KEY && (eventData.event === 'payment_created' || eventData.event === 'payment_approved')) {
+        console.log('\n🔄 PREPARANDO ENVIO PARA UTMIFY...');
+
+        // Log dos dados que serão enviados
+        const finalUtmSource = saleData.utm_source || clickData?.utm_source || 'direct';
+        const finalUtmMedium = saleData.utm_medium || clickData?.utm_medium || 'organic';
+        const finalUtmCampaign = saleData.utm_campaign || clickData?.utm_campaign || 'default';
+
+        console.log('📤 DADOS PARA UTMIFY:');
+        console.log(`├─ Sale Code: ${saleData.sale_code}`);
+        console.log(`├─ Customer: ${saleData.customer_name}`);
+        console.log(`├─ Value: R$ ${saleData.plan_value.toFixed(2)}`);
+        console.log(`├─ Status: ${saveStatus === 'approved' ? 'paid' : 'waiting_payment'}`);
+        console.log('└─ Tracking Parameters:');
+        console.log(`   ├─ utm_source: "${finalUtmSource}"`);
+        console.log(`   ├─ utm_medium: "${finalUtmMedium}"`);
+        console.log(`   └─ utm_campaign: "${finalUtmCampaign}"`);
+
         const utmifyResult = await sendToUtmify(saleData, clickData);
-        console.log('🔄 UTMify:', utmifyResult.success ? '✅' : '❌',
-            `Status: ${utmifyResult.success ? 'Enviado' : 'Falhou'}`);
+
+        console.log('\n🔄 RESULTADO UTMIFY:');
+        console.log(`├─ Status: ${utmifyResult.success ? '✅ ENVIADO COM SUCESSO' : '❌ FALHA NO ENVIO'}`);
+        console.log(`├─ Venda: ${saleData.sale_code}`);
+        console.log(`└─ Tracking: ${finalUtmSource} / ${finalUtmCampaign}`);
 
         // Se for approved, também processar pixels (SEMPRE sem teste para webhook real)
         if (eventData.event === 'payment_approved' && saveResult.success) {
-            const pixelResults = await processPixelEvents(saleData, clickData, false); // CORREÇÃO: false aqui
-            console.log('🎯 Pixels processados:', pixelResults.filter(p => p.success).length, 'sucesso(s)');
+            console.log('\n🎯 PROCESSANDO PIXELS...');
+            console.log(`📊 Pixels ativos: ${(await getActivePixels()).length}`);
+
+            const pixelResults = await processPixelEvents(saleData, clickData, false);
+            const successCount = pixelResults.filter(p => p.success).length;
+
+            console.log('\n🎯 RESULTADO DOS PIXELS:');
+            console.log(`├─ Total processados: ${pixelResults.length}`);
+            console.log(`├─ Sucessos: ${successCount}`);
+            console.log(`└─ Falhas: ${pixelResults.length - successCount}`);
+
+            if (successCount > 0) {
+                pixelResults.filter(p => p.success).forEach(result => {
+                    console.log(`   ✅ ${result.platform.toUpperCase()}: Evento Purchase enviado`);
+                });
+            }
+
+            if (pixelResults.some(p => !p.success)) {
+                console.log('\n⚠️ Pixels com falha:');
+                pixelResults.filter(p => !p.success).forEach(result => {
+                    console.log(`   ❌ ${result.platform.toUpperCase()}: ${result.error}`);
+                });
+            }
         }
+    } else if (!UTMIFY_API_KEY) {
+        console.log('\n⚠️ UTMIFY_API_KEY NÃO CONFIGURADA');
+        console.log('💡 Configure a variável de ambiente UTMIFY_API_KEY no Render');
+        console.log('💡 Env: UTMIFY_API_KEY=sua_chave_api_aqui');
+    } else {
+        console.log('\nℹ️ Evento não requer envio para UTMify');
     }
+
+    console.log('\n══════════════════════════════════════════════════════════════');
+    console.log(`✅ PROCESSAMENTO DE ${eventData.event.toUpperCase()} CONCLUÍDO`);
+    console.log('══════════════════════════════════════════════════════════════\n');
 }
 
 // Rota 5: Redirecionamento com tracking
