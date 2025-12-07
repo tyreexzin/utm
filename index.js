@@ -241,14 +241,15 @@ async function saveSale(data) {
             sale_code, click_id, customer_name, customer_email, customer_phone,
             customer_document, plan_name, plan_value, currency, payment_platform,
             payment_method, status, ip, user_agent, utm_source, utm_medium,
-            utm_campaign, utm_content, utm_term, approved_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            utm_campaign, utm_content, utm_term, created_at, approved_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         ON CONFLICT (sale_code) DO UPDATE SET
             status = EXCLUDED.status,
             approved_at = EXCLUDED.approved_at,
             customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
             customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
-            plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value)
+            plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value),
+            updated_at = CURRENT_TIMESTAMP
         RETURNING id;
     `;
 
@@ -264,7 +265,7 @@ async function saveSale(data) {
         data.currency || 'BRL',
         data.payment_platform || 'apexvips',
         data.payment_method || 'unknown',
-        'approved',
+        data.status || 'pending', // ← Agora aceita status
         data.ip || '0.0.0.0',
         data.user_agent || 'ApexVips/1.0',
         data.utm_source,
@@ -272,7 +273,8 @@ async function saveSale(data) {
         data.utm_campaign,
         data.utm_content || '',
         data.utm_term || '',
-        data.approved_at ? new Date(data.approved_at * 1000) : new Date()
+        data.created_at ? new Date(data.created_at * 1000) : new Date(),
+        data.approved_at ? new Date(data.approved_at * 1000) : null
     ];
 
     try {
@@ -312,13 +314,36 @@ async function sendToUtmify(saleData, clickData) {
 
     try {
         const now = new Date();
+        const isTest = saleData.sale_code.includes('TEST') || false;
+
+        // Determinar datas baseado no status
+        const createdAt = saleData.created_at ?
+            new Date(saleData.created_at * 1000) : now;
+        const approvedDate = saleData.status === 'paid' && saleData.approved_at ?
+            new Date(saleData.approved_at * 1000) :
+            (saleData.status === 'pending' ? null : now);
+
+        // Mapear status para UTMify
+        const statusMap = {
+            'pending': 'pending',
+            'created': 'pending',
+            'approved': 'paid',
+            'paid': 'paid',
+            'refunded': 'refunded',
+            'cancelled': 'cancelled'
+        };
+
+        const utmifyStatus = statusMap[saleData.status?.toLowerCase()] || 'pending';
+
         const payload = {
             orderId: saleData.sale_code,
-            platform: saleData.payment_platform || 'Hotmart',
-            paymentMethod: saleData.payment_method || 'credit_card',
-            status: 'paid',
-            createdAt: now.toISOString().replace('T', ' ').substring(0, 19),
-            approvedDate: now.toISOString().replace('T', ' ').substring(0, 19),
+            platform: saleData.payment_platform || 'ApexVips',
+            paymentMethod: saleData.payment_method || 'unknown',
+            status: utmifyStatus,
+            createdAt: createdAt.toISOString().replace('T', ' ').substring(0, 19),
+            approvedDate: approvedDate ?
+                approvedDate.toISOString().replace('T', ' ').substring(0, 19) :
+                createdAt.toISOString().replace('T', ' ').substring(0, 19),
             customer: {
                 name: saleData.customer_name || 'Cliente',
                 email: saleData.customer_email || "naoinformado@utmify.com",
@@ -327,8 +352,8 @@ async function sendToUtmify(saleData, clickData) {
                 ip: saleData.ip || clickData?.ip || '0.0.0.0'
             },
             products: [{
-                id: 'vip-access',
-                name: saleData.plan_name || 'Acesso VIP',
+                id: 'apex-access',
+                name: saleData.plan_name || 'Acesso Apex Vips',
                 quantity: 1,
                 priceInCents: Math.round((saleData.plan_value || 0) * 100)
             }],
@@ -345,11 +370,15 @@ async function sendToUtmify(saleData, clickData) {
                 userCommissionInCents: Math.round((saleData.plan_value || 0) * 100),
                 currency: saleData.currency || 'BRL'
             },
-            isTest: saleData.sale_code.includes('TEST') || false
+            isTest: isTest
         };
 
         // Log para debug
-        console.log('📤 Enviando para UTMify:', JSON.stringify(payload, null, 2));
+        console.log('📤 Enviando para UTMify:', {
+            orderId: payload.orderId,
+            status: payload.status,
+            value: saleData.plan_value
+        });
 
         const response = await axios.post(
             'https://api.utmify.com.br/api-credentials/orders',
@@ -363,7 +392,7 @@ async function sendToUtmify(saleData, clickData) {
             }
         );
 
-        console.log(`✅ UTMify: Venda ${saleData.sale_code} enviada`, response.data);
+        console.log(`✅ UTMify: Venda ${saleData.sale_code} enviada (${utmifyStatus})`);
 
         // Marcar como enviado no banco
         await pool.query(
@@ -377,8 +406,7 @@ async function sendToUtmify(saleData, clickData) {
         console.error('❌ Erro ao enviar para UTMify:', {
             status: error.response?.status,
             data: error.response?.data,
-            message: error.message,
-            config: error.config?.data
+            message: error.message
         });
         return { success: false, error: error.message };
     }
@@ -741,6 +769,7 @@ app.post('/api/webhook/apex', async (req, res) => {
 });
 
 // Função para processar eventos da Apex
+// Função para processar eventos da Apex (ATUALIZADA)
 async function processApexEvent(eventData) {
     console.log(`💰 Processando ${eventData.event}: ${eventData.transaction?.sale_code}`);
 
@@ -777,24 +806,46 @@ async function processApexEvent(eventData) {
         utm_campaign: eventData.tracking?.utm_campaign,
         utm_content: eventData.tracking?.utm_content,
         utm_term: eventData.tracking?.utm_term,
-        approved_at: eventData.timestamp
+        created_at: eventData.timestamp,
+        approved_at: eventData.event === 'payment_approved' ? eventData.timestamp : null
     };
 
-    // 1. Salvar venda no banco (apenas se for payment_approved)
-    if (eventData.event === 'payment_approved') {
-        const saveResult = await saveSale(saleData);
-        console.log(`💾 Venda salva: ${saleData.sale_code}`, saveResult.success ? '✅' : '❌');
+    // Determinar status para UTMify
+    let utmifyStatus = 'pending';
+    let saveStatus = 'pending';
 
-        // 2. Enviar eventos para pixels
-        if (saveResult.success) {
+    if (eventData.event === 'payment_created') {
+        utmifyStatus = 'pending';
+        saveStatus = 'created';
+    } else if (eventData.event === 'payment_approved') {
+        utmifyStatus = 'paid';
+        saveStatus = 'approved';
+    }
+
+    // 1. Salvar venda no banco
+    saleData.status = saveStatus;
+    const saveResult = await saveSale(saleData);
+    console.log(`💾 Venda salva: ${saleData.sale_code} (${saveStatus})`, saveResult.success ? '✅' : '❌');
+
+    // 2. Enviar para UTMify (se API key configurada e evento de pagamento)
+    if (UTMIFY_API_KEY && (eventData.event === 'payment_created' || eventData.event === 'payment_approved')) {
+        // Preparar dados específicos para UTMify
+        const utmifyData = {
+            ...saleData,
+            status: utmifyStatus,
+            // Para payment_created, usar created_at como approvedDate também
+            approved_at: eventData.event === 'payment_created' ? eventData.timestamp : saleData.approved_at
+        };
+
+        const utmifyResult = await sendToUtmify(utmifyData, clickData);
+        console.log('🔄 UTMify:', utmifyResult.success ? '✅' : '❌',
+            `Status: ${utmifyStatus}`,
+            utmifyResult.error ? `Erro: ${utmifyResult.error}` : '');
+
+        // Se for approved, também processar pixels
+        if (eventData.event === 'payment_approved' && saveResult.success) {
             const pixelResults = await processPixelEvents(saleData, clickData);
-            console.log('🎯 Pixels processados:', pixelResults);
-        }
-
-        // 3. Enviar para UTMify
-        if (UTMIFY_API_KEY) {
-            const utmifyResult = await sendToUtmify(saleData, clickData);
-            console.log('🔄 UTMify:', utmifyResult.success ? '✅' : '❌');
+            console.log('🎯 Pixels processados:', pixelResults.filter(p => p.success).length, 'sucesso(s)');
         }
     }
 }
@@ -1100,6 +1151,49 @@ app.post('/api/test/events', async (req, res) => {
             success: false,
             error: error.message
         });
+    }
+});
+
+// Rota 7 para testar UTMify com diferentes status
+app.post('/api/test/utmify-status', async (req, res) => {
+    try {
+        const { status = 'created' } = req.body; // 'created' ou 'approved'
+
+        const testData = {
+            sale_code: `TEST_${status.toUpperCase()}_${Date.now()}`,
+            customer_name: 'Cliente Teste ' + status,
+            customer_email: `teste_${status}@utmify.com`,
+            customer_phone: '11999999999',
+            plan_name: 'Acesso VIP Teste',
+            plan_value: 97.00,
+            currency: 'BRL',
+            payment_platform: 'ApexVips',
+            payment_method: 'pix',
+            utm_source: 'facebook_test',
+            utm_campaign: 'test_' + status,
+            status: status,
+            created_at: Math.floor(Date.now() / 1000),
+            approved_at: status === 'approved' ? Math.floor(Date.now() / 1000) : null
+        };
+
+        const clickData = {
+            ip: '189.45.210.130',
+            user_agent: 'Test-UA/1.0',
+            utm_source: 'facebook_test'
+        };
+
+        const result = await sendToUtmify(testData, clickData);
+
+        res.json({
+            success: result.success,
+            message: `Teste ${status} enviado para UTMify`,
+            status: status,
+            data: result.data,
+            error: result.error
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 
