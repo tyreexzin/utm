@@ -861,6 +861,133 @@ app.get('/', (req, res) => {
     });
 });
 
+// CORREÇÃO COMPLETA DAS DATAS + REPROCESSAMENTO
+app.post("/admin/fix-dates-and-reprocess", async (req, res) => {
+    try {
+        console.log("\n🔧 Iniciando correção automática de datas...");
+
+        // 1️⃣ Buscar todas as vendas
+        const result = await pool.query("SELECT * FROM sales ORDER BY created_at ASC");
+        const sales = result.rows;
+
+        const summary = {
+            fixed: 0,
+            reprocessed: 0,
+            failed: 0,
+            details: []
+        };
+
+        for (const sale of sales) {
+            try {
+                // 2️⃣ DETECTAR DATAS ERRADAS (+1 ano)
+                const created = new Date(sale.created_at);
+                const approved = sale.approved_at ? new Date(sale.approved_at) : null;
+
+                const nowYear = new Date().getFullYear();
+
+                let correctedCreated = created;
+                let correctedApproved = approved;
+
+                // SE O ANO DA VENDA > ANO ATUAL ⇒ ESTÁ ERRADO ⇒ SUBTRAIR 1 ANO
+                if (created.getFullYear() > nowYear) {
+                    correctedCreated = new Date(created.setFullYear(created.getFullYear() - 1));
+                }
+
+                if (approved && approved.getFullYear() > nowYear) {
+                    correctedApproved = new Date(approved.setFullYear(approved.getFullYear() - 1));
+                }
+
+                // 3️⃣ Converter BR → UTC caso esteja errado
+                const finalCreatedUTC = new Date(correctedCreated.getTime());
+                const finalApprovedUTC = correctedApproved
+                    ? new Date(correctedApproved.getTime())
+                    : null;
+
+                // 4️⃣ Atualizar no banco
+                await pool.query(
+                    `UPDATE sales 
+                     SET created_at = $1,
+                         approved_at = $2
+                     WHERE sale_code = $3`,
+                    [
+                        finalCreatedUTC.toISOString(),
+                        finalApprovedUTC ? finalApprovedUTC.toISOString() : null,
+                        sale.sale_code
+                    ]
+                );
+
+                summary.fixed++;
+
+                // 5️⃣ BUSCAR UTM REAL
+                const clickData = await recoverUTM(sale);
+
+                // 6️⃣ PREPARAR saleData
+                const saleData = {
+                    sale_code: sale.sale_code,
+                    click_id: sale.click_id || sale.sale_code,
+
+                    customer_name: sale.customer_name,
+                    customer_email: sale.customer_email,
+                    customer_phone: sale.customer_phone,
+                    customer_document: sale.customer_document,
+
+                    plan_name: sale.plan_name,
+                    plan_value: sale.plan_value,
+                    currency: sale.currency,
+                    payment_platform: sale.payment_platform,
+                    payment_method: sale.payment_method,
+
+                    ip: sale.ip,
+                    user_agent: sale.user_agent,
+
+                    utm_source: clickData?.utm_source,
+                    utm_medium: clickData?.utm_medium,
+                    utm_campaign: clickData?.utm_campaign,
+                    utm_content: clickData?.utm_content,
+                    utm_term: clickData?.utm_term,
+
+                    status: sale.status,
+                    created_at: finalCreatedUTC,
+                    approved_at: finalApprovedUTC
+                };
+
+                // 7️⃣ Enviar para UTMify
+                const utmRes = await sendToUtmify(saleData, clickData);
+
+                // 8️⃣ Reenviar evento para TikTok / Facebook
+                await processPixelEvents(saleData, clickData, false);
+
+                summary.reprocessed++;
+
+                summary.details.push({
+                    sale_code: sale.sale_code,
+                    fixed_date: true,
+                    utmify: utmRes.success
+                });
+
+            } catch (err2) {
+                summary.failed++;
+                summary.details.push({
+                    sale_code: sale.sale_code,
+                    error: err2.message
+                });
+            }
+        }
+
+        res.json({
+            success: true,
+            message: "Correção completa de datas + reprocessamento finalizado",
+            report: summary
+        });
+
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+    }
+});
+
 // Rota 2: Receber cliques do frontend
 app.post('/api/track', async (req, res) => {
     try {
