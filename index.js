@@ -861,67 +861,51 @@ app.get('/', (req, res) => {
     });
 });
 
-// CORREÇÃO COMPLETA DAS DATAS + REPROCESSAMENTO
+// ===============================
+// FIXAR TODAS AS DATAS DO BANCO (OPÇÃO A - DATAS = HOJE) + REPROCESSAR
+// ===============================
+
 app.post("/admin/fix-dates-and-reprocess", async (req, res) => {
     try {
-        console.log("\n🔧 Iniciando correção automática de datas...");
+        console.log("\n🔧 Iniciando correção automática de datas (OPÇÃO A - DATAS HOJE)...\n");
 
-        // 1️⃣ Buscar todas as vendas
+        // Buscar todas as vendas
         const result = await pool.query("SELECT * FROM sales ORDER BY created_at ASC");
         const sales = result.rows;
 
         const summary = {
+            total: sales.length,
             fixed: 0,
             reprocessed: 0,
             failed: 0,
             details: []
         };
 
+        // 🕒 DATA ATUAL EM UTC (para createdAt e approvedAt)
+        const nowUTC = new Date();
+        const nowUTCFormatted = nowUTC.toISOString().replace("T", " ").substring(0, 19);
+
         for (const sale of sales) {
             try {
-                // 2️⃣ DETECTAR DATAS ERRADAS (+1 ano)
-                const created = new Date(sale.created_at);
-                const approved = sale.approved_at ? new Date(sale.approved_at) : null;
 
-                const nowYear = new Date().getFullYear();
+                // 🎯 Todas as vendas agora terão createdAt = HOJE
+                const finalCreatedUTC = nowUTCFormatted;
+                const finalApprovedUTC = sale.status === "approved" ? nowUTCFormatted : null;
 
-                let correctedCreated = created;
-                let correctedApproved = approved;
-
-                // SE O ANO DA VENDA > ANO ATUAL ⇒ ESTÁ ERRADO ⇒ SUBTRAIR 1 ANO
-                if (created.getFullYear() > nowYear) {
-                    correctedCreated = new Date(created.setFullYear(created.getFullYear() - 1));
-                }
-
-                if (approved && approved.getFullYear() > nowYear) {
-                    correctedApproved = new Date(approved.setFullYear(approved.getFullYear() - 1));
-                }
-
-                // 3️⃣ Converter BR → UTC caso esteja errado
-                const finalCreatedUTC = new Date(correctedCreated.getTime());
-                const finalApprovedUTC = correctedApproved
-                    ? new Date(correctedApproved.getTime())
-                    : null;
-
-                // 4️⃣ Atualizar no banco
+                // 1️⃣ Atualizar no banco
                 await pool.query(
                     `UPDATE sales 
-                     SET created_at = $1,
-                         approved_at = $2
+                     SET created_at = $1, approved_at = $2
                      WHERE sale_code = $3`,
-                    [
-                        finalCreatedUTC.toISOString(),
-                        finalApprovedUTC ? finalApprovedUTC.toISOString() : null,
-                        sale.sale_code
-                    ]
+                    [finalCreatedUTC, finalApprovedUTC, sale.sale_code]
                 );
 
                 summary.fixed++;
 
-                // 5️⃣ BUSCAR UTM REAL
+                // 2️⃣ Recuperar UTMs reais
                 const clickData = await recoverUTM(sale);
 
-                // 6️⃣ PREPARAR saleData
+                // 3️⃣ Montar saleData corrigido
                 const saleData = {
                     sale_code: sale.sale_code,
                     click_id: sale.click_id || sale.sale_code,
@@ -940,21 +924,21 @@ app.post("/admin/fix-dates-and-reprocess", async (req, res) => {
                     ip: sale.ip,
                     user_agent: sale.user_agent,
 
-                    utm_source: clickData?.utm_source,
-                    utm_medium: clickData?.utm_medium,
-                    utm_campaign: clickData?.utm_campaign,
-                    utm_content: clickData?.utm_content,
-                    utm_term: clickData?.utm_term,
+                    utm_source: clickData?.utm_source || sale.utm_source,
+                    utm_medium: clickData?.utm_medium || sale.utm_medium,
+                    utm_campaign: clickData?.utm_campaign || sale.utm_campaign,
+                    utm_content: clickData?.utm_content || sale.utm_content,
+                    utm_term: clickData?.utm_term || sale.utm_term,
 
                     status: sale.status,
                     created_at: finalCreatedUTC,
                     approved_at: finalApprovedUTC
                 };
 
-                // 7️⃣ Enviar para UTMify
+                // 4️⃣ Enviar para UTMify
                 const utmRes = await sendToUtmify(saleData, clickData);
 
-                // 8️⃣ Reenviar evento para TikTok / Facebook
+                // 5️⃣ Enviar para TikTok / Facebook
                 await processPixelEvents(saleData, clickData, false);
 
                 summary.reprocessed++;
@@ -965,28 +949,28 @@ app.post("/admin/fix-dates-and-reprocess", async (req, res) => {
                     utmify: utmRes.success
                 });
 
-            } catch (err2) {
+            } catch (internalErr) {
+                console.error("❌ Erro interno ao corrigir venda:", sale.sale_code, internalErr);
                 summary.failed++;
                 summary.details.push({
                     sale_code: sale.sale_code,
-                    error: err2.message
+                    error: internalErr.message
                 });
             }
         }
 
         res.json({
             success: true,
-            message: "Correção completa de datas + reprocessamento finalizado",
+            message: "Correção completa (TODAS AS DATAS = HOJE) + reprocessamento executado.",
             report: summary
         });
 
     } catch (err) {
-        res.status(500).json({
-            success: false,
-            error: err.message
-        });
+        console.error("❌ ERRO CRÍTICO:", err);
+        res.status(500).json({ success: false, error: err.message });
     }
 });
+
 
 // Rota 2: Receber cliques do frontend
 app.post('/api/track', async (req, res) => {
