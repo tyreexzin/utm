@@ -1158,21 +1158,21 @@ async function processApexEvent(eventData) {
     try {
         console.log("\n💰 PROCESSANDO EVENTO APEX:", eventData.event);
 
-        // 1️⃣ Capturar dados essenciais
-        const timestampBR = eventData.timestamp; // Unix seconds (BR)
-        const createdAtUTC = brTimestampToUTC(timestampBR); // conversão correta
-
+        // 1️⃣ Capturar datas
+        const timestampBR = eventData.timestamp;
+        const createdAtUTC = brTimestampToUTC(timestampBR);
         const approvedAtUTC =
             eventData.event === "payment_approved"
                 ? brTimestampToUTC(timestampBR)
                 : null;
 
+        // 2️⃣ Identificar sale_code
         const saleCode =
             eventData.transaction?.sale_code ||
             eventData.transaction?.external_transaction_id ||
             `APEX_${eventData.timestamp}`;
 
-        // 2️⃣ Tentar achar venda existente
+        // 3️⃣ Buscar venda anterior
         const existing = await pool.query(
             "SELECT * FROM sales WHERE sale_code = $1 LIMIT 1",
             [saleCode]
@@ -1180,15 +1180,10 @@ async function processApexEvent(eventData) {
 
         const isUpdate = existing.rows.length > 0;
 
-        // 3️⃣ Determinar status
-        let status = "pending";
-        if (eventData.event === "payment_created") status = "created";
-        if (eventData.event === "payment_approved") status = "approved";
-
-        // 4️⃣ Construir objeto saleData
+        // 4️⃣ Criar objeto base da venda
         const baseSaleData = {
             sale_code: saleCode,
-            click_id: saleCode, // seu sistema usa sale_code COMO click_id (pixel.gif)
+            click_id: saleCode, // seu sistema usa sale_code como click_id
             customer_name:
                 eventData.customer?.full_name ||
                 eventData.customer?.profile_name ||
@@ -1208,10 +1203,16 @@ async function processApexEvent(eventData) {
             payment_method: eventData.transaction?.payment_method || "pix",
             ip: eventData.origin?.ip || existing.rows[0]?.ip || "0.0.0.0",
             user_agent: eventData.origin?.user_agent || "ApexVipsBot/1.0",
-            status,
+            status:
+                eventData.event === "payment_created" ? "created" :
+                    eventData.event === "payment_approved" ? "approved" :
+                        "pending",
             created_at: isUpdate ? existing.rows[0].created_at : createdAtUTC,
-            approved_at: status === "approved" ? approvedAtUTC : existing.rows[0]?.approved_at || null,
+            approved_at: isUpdate
+                ? existing.rows[0]?.approved_at
+                : approvedAtUTC,
 
+            // UTMs preenchidas depois
             utm_source: null,
             utm_medium: null,
             utm_campaign: null,
@@ -1219,10 +1220,24 @@ async function processApexEvent(eventData) {
             utm_term: null
         };
 
-        // 5️⃣ RECUPERAR UTM CORRETA
+        // 5️⃣ Recuperar UTM real
         const clickData = await recoverUTM(baseSaleData);
 
-        if (clickData) {
+        // ====================================================
+        // 🔥 FALLBACK AUTOMÁTICO PARA MAILING / INTERNO
+        // ====================================================
+        const hasRealUTM = clickData?.utm_source || baseSaleData.utm_source;
+
+        if (!hasRealUTM) {
+            baseSaleData.utm_source = "direct";
+            baseSaleData.utm_medium = "internal";
+            baseSaleData.utm_campaign = "mailing";
+            baseSaleData.utm_content = baseSaleData.plan_name || "";
+            baseSaleData.utm_term = "";
+        }
+
+        // Se click tiver UTM válida → usa ela
+        if (clickData?.utm_source) {
             baseSaleData.utm_source = clickData.utm_source;
             baseSaleData.utm_medium = clickData.utm_medium;
             baseSaleData.utm_campaign = clickData.utm_campaign;
@@ -1230,7 +1245,7 @@ async function processApexEvent(eventData) {
             baseSaleData.utm_term = clickData.utm_term;
         }
 
-        // 6️⃣ SALVAR NO BANCO
+        // 6️⃣ Salvar no banco
         await saveSale({
             ...baseSaleData,
             approved_at: baseSaleData.approved_at
@@ -1238,13 +1253,13 @@ async function processApexEvent(eventData) {
 
         console.log("💾 VENDA SALVA/ATUALIZADA:", saleCode);
 
-        // 7️⃣ ENVIAR PARA UTMIFY
+        // 7️⃣ Enviar para UTMify
         const utmRes = await sendToUtmify(baseSaleData, clickData);
         console.log("📤 UTMIFY RESULTADO:", utmRes);
 
-        // 8️⃣ ENVIAR EVENTOS PARA TIKTOK / FACEBOOK (SE FOR APPROVED)
-        if (status === "approved") {
-            console.log("📣 Enviando eventos de pixel (TikTok/Facebook)...");
+        // 8️⃣ Enviar para TikTok/Facebook somente se approved
+        if (baseSaleData.status === "approved") {
+            console.log("📣 Enviando eventos de pixel...");
             await processPixelEvents(baseSaleData, clickData, false);
         }
 
