@@ -449,39 +449,26 @@ async function sendToUtmify(saleData, clickData) {
 
 // --- FUNÇÕES DE PIXEL ---
 
-// Enviar evento para TikTok (API v1.3 atualizada) - CORRIGIDA
 async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
     const url = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 
-    // Preparar dados do usuário (hashed)
     const user = {};
-    if (eventData.customer_email) {
+
+    if (eventData.customer_email)
         user.email = hashData(eventData.customer_email);
-    }
-    if (eventData.customer_phone) {
+
+    if (eventData.customer_phone)
         user.phone = hashData(eventData.customer_phone.replace(/\D/g, ''));
-    }
-    if (eventData.customer_document) {
+
+    if (eventData.customer_document)
         user.external_id = hashData(eventData.customer_document.replace(/\D/g, ''));
-    }
 
-    // Determinar content_type baseado no plan_name
-    let content_type = 'product';
-    if (eventData.plan_name) {
-        const planLower = eventData.plan_name.toLowerCase();
-        if (planLower.includes('curso') || planLower.includes('treinamento') || planLower.includes('mentoria')) {
-            content_type = 'course';
-        } else if (planLower.includes('consultoria') || planLower.includes('serviço') || planLower.includes('service')) {
-            content_type = 'service';
-        } else if (planLower.includes('assinatura') || planLower.includes('subscription')) {
-            content_type = 'subscription';
-        }
-    }
+    if (clickData?.ip)
+        user.ip = clickData.ip;
 
-    // CORREÇÃO: Corrigir o valor (multiplicar por 100 para centavos)
-    const valueInCents = eventData.plan_value * 100;
+    if (eventData.user_agent)
+        user.user_agent = eventData.user_agent;
 
-    // Construir payload conforme documentação do TikTok
     const payload = {
         event_source: "web",
         event_source_id: pixel.event_source_id || pixel.pixel_id,
@@ -490,65 +477,66 @@ async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
                 event: "Purchase",
                 event_time: Math.floor(Date.now() / 1000),
                 event_id: eventData.sale_code,
-                user: Object.keys(user).length > 0 ? user : undefined,
+
+                user,
+
                 properties: {
-                    value: valueInCents, // CORREÇÃO: Valor em centavos
-                    currency: eventData.currency || 'BRL',
-                    content_id: 'vip_access',
-                    content_type: content_type,
-                    content_name: eventData.plan_name || 'Acesso VIP',
-                    query: eventData.utm_term || ''
+                    currency: eventData.currency || "BRL",
+                    value: eventData.plan_value, // TikTok exige valor em REAIS, não centavos
+
+                    contents: [
+                        {
+                            content_id: "vip_access",
+                            content_name: eventData.plan_name || "Acesso VIP",
+                            quantity: 1,
+                            price: eventData.plan_value
+                        }
+                    ],
+
+                    content_type: "product",
+
+                    // OBRIGATÓRIO PARA RASTREAMENTO DE ANÚNCIOS:
+                    context: clickData?.ttclid ? {
+                        ad: {
+                            callback: clickData.ttclid
+                        }
+                    } : undefined
                 },
+
                 page: {
-                    url: clickData?.landing_page || 'https://tracking.com',
-                    referrer: clickData?.referrer || ''
-                },
-                // Adicionar parâmetros de contexto se disponíveis
-                context: clickData?.ttclid ? {
-                    ad: {
-                        callback: clickData.ttclid
-                    }
-                } : undefined
+                    url: clickData?.landing_page || "https://tracking.com",
+                    referrer: clickData?.referrer || ""
+                }
             }
         ]
     };
 
-    // Remover campos undefined
-    const cleanPayload = JSON.parse(JSON.stringify(payload));
+    const clean = JSON.parse(JSON.stringify(payload));
 
-    // CORREÇÃO CRÍTICA: Só enviar test_event_code se for realmente teste
     if (isTest) {
-        // Usar test_event_code do pixel ou padrão apenas em teste
-        cleanPayload.test_event_code = pixel.test_event_code || 'TEST54815';
+        clean.test_event_code = pixel.test_event_code || "TEST54815";
     }
-    // NÃO enviar test_event_code em produção!
 
     try {
-        console.log('📤 Enviando para TikTok:', JSON.stringify(cleanPayload, null, 2));
+        console.log("📤 Enviando TikTok FIX:", JSON.stringify(clean, null, 2));
 
-        const response = await axios.post(url, cleanPayload, {
+        const response = await axios.post(url, clean, {
             headers: {
-                'Access-Token': pixel.access_token,
-                'Content-Type': 'application/json'
-            },
-            timeout: 10000
+                "Access-Token": pixel.access_token,
+                "Content-Type": "application/json"
+            }
         });
 
-        console.log(`✅ TikTok: Evento Purchase enviado para ${eventData.sale_code}`);
-        console.log('Resposta TikTok:', JSON.stringify(response.data, null, 2));
+        console.log("📌 TikTok OK:", response.data);
 
-        return { success: true, data: response.data };
+        return { success: true };
 
-    } catch (error) {
-        console.error('❌ TikTok Error:', {
-            status: error.response?.status,
-            data: error.response?.data,
-            message: error.message,
-            config: error.config?.data
-        });
-        return { success: false, error: error.message };
+    } catch (err) {
+        console.error("🔥 ERRO TikTok:", err.response?.data || err.message);
+        return { success: false, error: err.message };
     }
 }
+
 
 // Enviar evento para Facebook - CORRIGIDA
 async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
