@@ -1434,7 +1434,6 @@ app.post('/admin/resend-utmify', async (req, res) => {
             });
         }
 
-        // Buscar vendas
         let query = 'SELECT * FROM sales';
         if (only_missing) query += ' WHERE utmify_sent = FALSE';
         query += ' ORDER BY created_at ASC';
@@ -1452,9 +1451,11 @@ app.post('/admin/resend-utmify', async (req, res) => {
             details: []
         };
 
+        const formatDate = (date) =>
+            new Date(date).toISOString().replace("T", " ").substring(0, 19);
+
         for (const sale of sales) {
             try {
-                // Buscar click associado
                 let clickData = null;
                 if (sale.click_id) {
                     const clickRes = await pool.query(
@@ -1464,17 +1465,12 @@ app.post('/admin/resend-utmify', async (req, res) => {
                     if (clickRes.rows.length > 0) clickData = clickRes.rows[0];
                 }
 
-                // Função para formatar datas
-                const formatDate = (d) =>
-                    new Date(d).toISOString().replace("T", " ").substring(0, 19);
+                // 🔥 regra definitiva:
+                // - approved => enviar "paid" (somente)
+                // - created => enviar "waiting_payment"
+                const utmifyStatus =
+                    sale.status === "approved" ? "paid" : "waiting_payment";
 
-                // Definir status UTMify
-                let utmifyStatus = "waiting_payment";
-                if (sale.status === "approved") {
-                    utmifyStatus = "paid";
-                }
-
-                // Montar saleData completo
                 const saleData = {
                     sale_code: sale.sale_code,
                     click_id: sale.click_id,
@@ -1485,7 +1481,7 @@ app.post('/admin/resend-utmify', async (req, res) => {
                     customer_document: sale.customer_document,
 
                     plan_name: sale.plan_name,
-                    plan_value: parseFloat(sale.plan_value) || 0,
+                    plan_value: parseFloat(sale.plan_value),
                     currency: sale.currency,
                     payment_platform: sale.payment_platform,
                     payment_method: sale.payment_method,
@@ -1501,38 +1497,35 @@ app.post('/admin/resend-utmify', async (req, res) => {
 
                     status: utmifyStatus,
 
-                    // DATAS CORRETAS PARA A UTMIFY
                     createdAt: sale.created_at
                         ? formatDate(sale.created_at)
                         : formatDate(new Date()),
 
                     approvedDate:
-                        sale.status === "approved" && sale.approved_at
+                        sale.status === "approved"
                             ? formatDate(sale.approved_at)
                             : null
                 };
 
-                // Enviar pra UTMify
-                const utmResult = await sendToUtmify(saleData, clickData);
+                const result = await sendToUtmify(saleData, clickData);
 
                 summary.details.push({
                     sale_code: sale.sale_code,
                     status: sale.status,
-                    utmify_status: utmResult.success ? "success" : "failed",
-                    error: utmResult.success ? null : utmResult.error
+                    utmify_status: result.success ? "success" : "failed",
+                    error: result.error || null
                 });
 
-                if (utmResult.success) summary.success++;
+                if (result.success) summary.success++;
                 else summary.failed++;
 
-            } catch (inner) {
-                console.error("❌ Erro interno:", inner.message);
+            } catch (innerError) {
                 summary.failed++;
                 summary.details.push({
                     sale_code: sale.sale_code,
                     status: sale.status,
                     utmify_status: "failed",
-                    error: inner.message
+                    error: innerError.message
                 });
             }
         }
@@ -1544,7 +1537,6 @@ app.post('/admin/resend-utmify', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("❌ Erro geral:", error.message);
         res.status(500).json({
             success: false,
             error: error.message
