@@ -1,4 +1,4 @@
-// index.js - Backend Principal com UTMify e Pixels Atualizados
+// index.js - Backend Principal com UTMify e Pixels Atualizados - VERSÃO CORRIGIDA
 const express = require('express');
 const axios = require('axios');
 const { Pool } = require('pg');
@@ -235,7 +235,6 @@ async function getClick(clickId) {
 }
 
 // 3. Salvar venda (ATUALIZADA)
-// Na função saveSale, REMOVA a linha que referencia updated_at:
 async function saveSale(data) {
     const query = `
         INSERT INTO sales (
@@ -250,7 +249,6 @@ async function saveSale(data) {
             customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
             customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
             plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value)
-            -- REMOVA: updated_at = CURRENT_TIMESTAMP
         RETURNING id;
     `;
 
@@ -314,10 +312,11 @@ async function sendToUtmify(saleData, clickData) {
 
     try {
         const now = new Date();
+        // CORREÇÃO: Só marcar como teste se realmente for um teste
         const isTest = saleData.sale_code.includes('TEST') || false;
 
         // Status correto para UTMify
-        let utmifyStatus = 'waiting_payment'; // mudar de 'pending' para 'waiting_payment'
+        let utmifyStatus = 'waiting_payment';
         if (saleData.status === 'approved' || saleData.status === 'paid') {
             utmifyStatus = 'paid';
         }
@@ -335,7 +334,7 @@ async function sendToUtmify(saleData, clickData) {
             orderId: saleData.sale_code,
             platform: saleData.payment_platform || 'ApexVips',
             paymentMethod: saleData.payment_method || 'unknown',
-            status: utmifyStatus, // usar 'waiting_payment' ou 'paid'
+            status: utmifyStatus,
             createdAt: now.toISOString().replace('T', ' ').substring(0, 19),
             approvedDate: utmifyStatus === 'paid'
                 ? now.toISOString().replace('T', ' ').substring(0, 19)
@@ -349,9 +348,9 @@ async function sendToUtmify(saleData, clickData) {
             },
             products: [{
                 id: planId,
-                planId: planId, // campo obrigatório
+                planId: planId,
                 name: saleData.plan_name || 'Acesso Apex Vips',
-                planName: saleData.plan_name || 'Acesso Apex Vips', // campo obrigatório
+                planName: saleData.plan_name || 'Acesso Apex Vips',
                 quantity: 1,
                 priceInCents: Math.round((saleData.plan_value || 0) * 100)
             }],
@@ -385,6 +384,8 @@ async function sendToUtmify(saleData, clickData) {
             }
         );
 
+        // MELHORIA: Log completo da resposta
+        console.log(`✅ UTMify Response (${response.status}):`, JSON.stringify(response.data, null, 2));
         console.log(`✅ UTMify: Venda ${saleData.sale_code} enviada (${utmifyStatus})`);
 
         // Marcar como enviado no banco
@@ -396,10 +397,17 @@ async function sendToUtmify(saleData, clickData) {
         return { success: true, data: response.data };
 
     } catch (error) {
+        // MELHORIA: Log mais detalhado
         console.error('❌ Erro ao enviar para UTMify:', {
             status: error.response?.status,
+            statusText: error.response?.statusText,
             data: error.response?.data,
-            message: error.message
+            message: error.message,
+            config: {
+                url: error.config?.url,
+                method: error.config?.method,
+                data: error.config?.data ? JSON.parse(error.config.data) : null
+            }
         });
         return { success: false, error: error.message };
     }
@@ -407,7 +415,7 @@ async function sendToUtmify(saleData, clickData) {
 
 // --- FUNÇÕES DE PIXEL ---
 
-// Enviar evento para TikTok (API v1.3 atualizada)
+// Enviar evento para TikTok (API v1.3 atualizada) - CORRIGIDA
 async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
     const url = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 
@@ -436,6 +444,9 @@ async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
         }
     }
 
+    // CORREÇÃO: Corrigir o valor (multiplicar por 100 para centavos)
+    const valueInCents = eventData.plan_value * 100;
+
     // Construir payload conforme documentação do TikTok
     const payload = {
         event_source: "web",
@@ -447,7 +458,7 @@ async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
                 event_id: eventData.sale_code,
                 user: Object.keys(user).length > 0 ? user : undefined,
                 properties: {
-                    value: eventData.plan_value || 0,
+                    value: valueInCents, // CORREÇÃO: Valor em centavos
                     currency: eventData.currency || 'BRL',
                     content_id: 'vip_access',
                     content_type: content_type,
@@ -471,10 +482,12 @@ async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
     // Remover campos undefined
     const cleanPayload = JSON.parse(JSON.stringify(payload));
 
-    // Adicionar test_event_code se existir OU se for teste manual
-    if (pixel.test_event_code || isTest) {
+    // CORREÇÃO CRÍTICA: Só enviar test_event_code se for realmente teste
+    if (isTest) {
+        // Usar test_event_code do pixel ou padrão apenas em teste
         cleanPayload.test_event_code = pixel.test_event_code || 'TEST54815';
     }
+    // NÃO enviar test_event_code em produção!
 
     try {
         console.log('📤 Enviando para TikTok:', JSON.stringify(cleanPayload, null, 2));
@@ -503,7 +516,7 @@ async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
     }
 }
 
-// Enviar evento para Facebook
+// Enviar evento para Facebook - CORRIGIDA
 async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
     const url = `https://graph.facebook.com/v19.0/${pixel.pixel_id}/events`;
 
@@ -532,6 +545,9 @@ async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
         }
     });
 
+    // CORREÇÃO: Valor em centavos para Facebook
+    const valueInCents = eventData.plan_value * 100;
+
     const payload = {
         data: [{
             event_name: 'Purchase',
@@ -540,13 +556,17 @@ async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
             action_source: 'website',
             user_data: userData,
             custom_data: {
-                value: eventData.plan_value || 0,
+                value: valueInCents, // CORREÇÃO: Valor em centavos
                 currency: eventData.currency || 'BRL'
             }
         }],
-        access_token: pixel.access_token,
-        test_event_code: isTest ? 'TEST54815' : pixel.test_event_code
+        access_token: pixel.access_token
     };
+
+    // CORREÇÃO: Só enviar test_event_code se for teste
+    if (isTest) {
+        payload.test_event_code = pixel.test_event_code || 'TEST54815';
+    }
 
     try {
         const response = await axios.post(url, payload);
@@ -600,12 +620,10 @@ async function processPixelEvents(saleData, clickData, isTest = false) {
 
 // --- ROTAS ---
 
-// Rota 0: Validação do webhook para Apex Vips (GET)
 // Rota 0: Validação GET para Apex Vips
 app.get('/api/webhook/apex', (req, res) => {
     console.log('✅ Validação GET do webhook recebida');
 
-    // Responder no formato que a Apex espera
     res.json({
         status: 'active',
         message: 'Webhook configurado e funcionando',
@@ -874,7 +892,6 @@ app.get('/pixel.gif', async (req, res) => {
     }
 });
 
-// Rota 4: Webhook da Apex Vips
 // Rota 4: Webhook da Apex Vips (ATUALIZADA)
 app.post('/api/webhook/apex', async (req, res) => {
     console.log('📨 Webhook recebido da Apex Vips');
@@ -999,9 +1016,9 @@ async function processApexEvent(eventData) {
         console.log('🔄 UTMify:', utmifyResult.success ? '✅' : '❌',
             `Status: ${utmifyResult.success ? 'Enviado' : 'Falhou'}`);
 
-        // Se for approved, também processar pixels
+        // Se for approved, também processar pixels (SEMPRE sem teste para webhook real)
         if (eventData.event === 'payment_approved' && saveResult.success) {
-            const pixelResults = await processPixelEvents(saleData, clickData);
+            const pixelResults = await processPixelEvents(saleData, clickData, false); // CORREÇÃO: false aqui
             console.log('🎯 Pixels processados:', pixelResults.filter(p => p.success).length, 'sucesso(s)');
         }
     }
@@ -1223,12 +1240,6 @@ app.delete('/admin/pixels/:id', async (req, res) => {
             [pixelId]
         );
 
-        // OU para deletar permanentemente:
-        // const result = await pool.query(
-        //     'DELETE FROM pixels WHERE id = $1 RETURNING *',
-        //     [pixelId]
-        // );
-
         console.log(`🗑️ Pixel deletado: ${result.rows[0].name} (${result.rows[0].platform})`);
 
         res.json({
@@ -1313,7 +1324,6 @@ app.post('/admin/pixels', async (req, res) => {
     }
 });
 
-// Estatísticas
 // Estatísticas completas
 app.get('/admin/stats', async (req, res) => {
     try {
@@ -1414,8 +1424,8 @@ app.get('/admin/stats', async (req, res) => {
             // Top campanhas por conversão (CORRIGIDA)
             pool.query(`
                 SELECT 
-                    s.utm_source,  -- Especificar tabela
-                    s.utm_campaign, -- Especificar tabela
+                    s.utm_source,
+                    s.utm_campaign,
                     COUNT(DISTINCT s.sale_code) as sales_count,
                     SUM(s.plan_value) as total_revenue,
                     COUNT(DISTINCT c.click_id) as clicks_count,
@@ -1673,9 +1683,9 @@ app.post('/api/test/events', async (req, res) => {
                 let result;
 
                 if (pixel.platform === 'tiktok') {
-                    result = await sendTikTokEvent(pixel, testData, clickData, true);
+                    result = await sendTikTokEvent(pixel, testData, clickData, true); // true = teste
                 } else if (pixel.platform === 'facebook') {
-                    result = await sendFacebookEvent(pixel, testData, clickData, true);
+                    result = await sendFacebookEvent(pixel, testData, clickData, true); // true = teste
                 }
 
                 results.push({
