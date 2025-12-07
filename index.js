@@ -235,21 +235,22 @@ async function getClick(clickId) {
 }
 
 // 3. Salvar venda (ATUALIZADA)
+// Na função saveSale, REMOVA a linha que referencia updated_at:
 async function saveSale(data) {
     const query = `
         INSERT INTO sales (
             sale_code, click_id, customer_name, customer_email, customer_phone,
             customer_document, plan_name, plan_value, currency, payment_platform,
             payment_method, status, ip, user_agent, utm_source, utm_medium,
-            utm_campaign, utm_content, utm_term, created_at, approved_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            utm_campaign, utm_content, utm_term, approved_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
         ON CONFLICT (sale_code) DO UPDATE SET
             status = EXCLUDED.status,
             approved_at = EXCLUDED.approved_at,
             customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
             customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
-            plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value),
-            updated_at = CURRENT_TIMESTAMP
+            plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value)
+            -- REMOVA: updated_at = CURRENT_TIMESTAMP
         RETURNING id;
     `;
 
@@ -265,7 +266,7 @@ async function saveSale(data) {
         data.currency || 'BRL',
         data.payment_platform || 'apexvips',
         data.payment_method || 'unknown',
-        data.status || 'pending', // ← Agora aceita status
+        data.status || 'pending',
         data.ip || '0.0.0.0',
         data.user_agent || 'ApexVips/1.0',
         data.utm_source,
@@ -273,7 +274,6 @@ async function saveSale(data) {
         data.utm_campaign,
         data.utm_content || '',
         data.utm_term || '',
-        data.created_at ? new Date(data.created_at * 1000) : new Date(),
         data.approved_at ? new Date(data.approved_at * 1000) : null
     ];
 
@@ -316,34 +316,30 @@ async function sendToUtmify(saleData, clickData) {
         const now = new Date();
         const isTest = saleData.sale_code.includes('TEST') || false;
 
-        // Determinar datas baseado no status
-        const createdAt = saleData.created_at ?
-            new Date(saleData.created_at * 1000) : now;
-        const approvedDate = saleData.status === 'paid' && saleData.approved_at ?
-            new Date(saleData.approved_at * 1000) :
-            (saleData.status === 'pending' ? null : now);
+        // Status correto para UTMify
+        let utmifyStatus = 'waiting_payment'; // mudar de 'pending' para 'waiting_payment'
+        if (saleData.status === 'approved' || saleData.status === 'paid') {
+            utmifyStatus = 'paid';
+        }
 
-        // Mapear status para UTMify
-        const statusMap = {
-            'pending': 'pending',
-            'created': 'pending',
-            'approved': 'paid',
-            'paid': 'paid',
-            'refunded': 'refunded',
-            'cancelled': 'cancelled'
-        };
-
-        const utmifyStatus = statusMap[saleData.status?.toLowerCase()] || 'pending';
+        // Gerar planId baseado no plan_name
+        const planId = saleData.plan_name
+            ? saleData.plan_name.toLowerCase()
+                .replace(/[^a-z0-9]/g, '-')
+                .replace(/-+/g, '-')
+                .replace(/^-|-$/g, '')
+                .substring(0, 50)
+            : 'apex-access';
 
         const payload = {
             orderId: saleData.sale_code,
             platform: saleData.payment_platform || 'ApexVips',
             paymentMethod: saleData.payment_method || 'unknown',
-            status: utmifyStatus,
-            createdAt: createdAt.toISOString().replace('T', ' ').substring(0, 19),
-            approvedDate: approvedDate ?
-                approvedDate.toISOString().replace('T', ' ').substring(0, 19) :
-                createdAt.toISOString().replace('T', ' ').substring(0, 19),
+            status: utmifyStatus, // usar 'waiting_payment' ou 'paid'
+            createdAt: now.toISOString().replace('T', ' ').substring(0, 19),
+            approvedDate: utmifyStatus === 'paid'
+                ? now.toISOString().replace('T', ' ').substring(0, 19)
+                : null,
             customer: {
                 name: saleData.customer_name || 'Cliente',
                 email: saleData.customer_email || "naoinformado@utmify.com",
@@ -352,8 +348,10 @@ async function sendToUtmify(saleData, clickData) {
                 ip: saleData.ip || clickData?.ip || '0.0.0.0'
             },
             products: [{
-                id: 'apex-access',
+                id: planId,
+                planId: planId, // campo obrigatório
                 name: saleData.plan_name || 'Acesso Apex Vips',
+                planName: saleData.plan_name || 'Acesso Apex Vips', // campo obrigatório
                 quantity: 1,
                 priceInCents: Math.round((saleData.plan_value || 0) * 100)
             }],
@@ -373,12 +371,7 @@ async function sendToUtmify(saleData, clickData) {
             isTest: isTest
         };
 
-        // Log para debug
-        console.log('📤 Enviando para UTMify:', {
-            orderId: payload.orderId,
-            status: payload.status,
-            value: saleData.plan_value
-        });
+        console.log('📤 Enviando para UTMify:', JSON.stringify(payload, null, 2));
 
         const response = await axios.post(
             'https://api.utmify.com.br/api-credentials/orders',
@@ -768,10 +761,19 @@ app.post('/api/webhook/apex', async (req, res) => {
     }
 });
 
-// Função para processar eventos da Apex
 // Função para processar eventos da Apex (ATUALIZADA)
 async function processApexEvent(eventData) {
     console.log(`💰 Processando ${eventData.event}: ${eventData.transaction?.sale_code}`);
+
+    // Criar sale_code se não existir
+    let saleCode = eventData.transaction?.sale_code;
+    if (!saleCode) {
+        // Usar external_transaction_id se disponível
+        saleCode = eventData.transaction?.external_transaction_id ||
+            eventData.transaction?.internal_transaction_id ||
+            `APEX_${eventData.timestamp}`;
+        console.log(`📝 Gerado sale_code: ${saleCode}`);
+    }
 
     // Buscar click_id associado (utm_id)
     let clickId = eventData.tracking?.utm_id;
@@ -788,7 +790,7 @@ async function processApexEvent(eventData) {
 
     // Preparar dados da venda no nosso formato
     const saleData = {
-        sale_code: eventData.transaction?.sale_code || `APEX_${Date.now()}`,
+        sale_code: saleCode,
         click_id: clickData?.click_id,
         customer_name: eventData.customer?.full_name || eventData.customer?.profile_name,
         customer_email: eventData.customer?.email || `user_${eventData.customer?.chat_id}@apexvips.com`,
@@ -810,15 +812,12 @@ async function processApexEvent(eventData) {
         approved_at: eventData.event === 'payment_approved' ? eventData.timestamp : null
     };
 
-    // Determinar status para UTMify
-    let utmifyStatus = 'pending';
+    // Determinar status
     let saveStatus = 'pending';
 
     if (eventData.event === 'payment_created') {
-        utmifyStatus = 'pending';
         saveStatus = 'created';
     } else if (eventData.event === 'payment_approved') {
-        utmifyStatus = 'paid';
         saveStatus = 'approved';
     }
 
@@ -829,18 +828,9 @@ async function processApexEvent(eventData) {
 
     // 2. Enviar para UTMify (se API key configurada e evento de pagamento)
     if (UTMIFY_API_KEY && (eventData.event === 'payment_created' || eventData.event === 'payment_approved')) {
-        // Preparar dados específicos para UTMify
-        const utmifyData = {
-            ...saleData,
-            status: utmifyStatus,
-            // Para payment_created, usar created_at como approvedDate também
-            approved_at: eventData.event === 'payment_created' ? eventData.timestamp : saleData.approved_at
-        };
-
-        const utmifyResult = await sendToUtmify(utmifyData, clickData);
+        const utmifyResult = await sendToUtmify(saleData, clickData);
         console.log('🔄 UTMify:', utmifyResult.success ? '✅' : '❌',
-            `Status: ${utmifyStatus}`,
-            utmifyResult.error ? `Erro: ${utmifyResult.error}` : '');
+            `Status: ${utmifyResult.success ? 'Enviado' : 'Falhou'}`);
 
         // Se for approved, também processar pixels
         if (eventData.event === 'payment_approved' && saveResult.success) {
@@ -1254,11 +1244,11 @@ app.get('/admin/stats', async (req, res) => {
                 LIMIT 10
             `),
 
-            // Top campanhas por conversão
+            // Top campanhas por conversão (CORRIGIDA)
             pool.query(`
                 SELECT 
-                    utm_source,
-                    utm_campaign,
+                    s.utm_source,  -- Especificar tabela
+                    s.utm_campaign, -- Especificar tabela
                     COUNT(DISTINCT s.sale_code) as sales_count,
                     SUM(s.plan_value) as total_revenue,
                     COUNT(DISTINCT c.click_id) as clicks_count,
@@ -1271,7 +1261,7 @@ app.get('/admin/stats', async (req, res) => {
                 LEFT JOIN clicks c ON s.click_id = c.click_id
                 WHERE s.utm_source IS NOT NULL 
                     AND s.created_at >= CURRENT_DATE - INTERVAL '30 days'
-                GROUP BY utm_source, utm_campaign
+                GROUP BY s.utm_source, s.utm_campaign
                 HAVING COUNT(DISTINCT s.sale_code) > 0
                 ORDER BY total_revenue DESC
                 LIMIT 10
