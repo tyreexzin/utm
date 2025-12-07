@@ -904,6 +904,143 @@ app.get('/admin/pixels', async (req, res) => {
     }
 });
 
+app.get('/admin/pixels/:id', async (req, res) => {
+    try {
+        const pixelId = parseInt(req.params.id);
+
+        if (isNaN(pixelId) || pixelId <= 0) {
+            return res.status(400).json({ error: 'ID inválido' });
+        }
+
+        const result = await pool.query(
+            'SELECT * FROM pixels WHERE id = $1',
+            [pixelId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Pixel não encontrado' });
+        }
+
+        // Não retornar o access_token por segurança
+        const pixel = result.rows[0];
+        const safePixel = {
+            id: pixel.id,
+            name: pixel.name,
+            platform: pixel.platform,
+            pixel_id: pixel.pixel_id,
+            event_source_id: pixel.event_source_id,
+            test_event_code: pixel.test_event_code,
+            is_active: pixel.is_active,
+            created_at: pixel.created_at,
+            updated_at: pixel.updated_at
+        };
+
+        res.json(safePixel);
+
+    } catch (error) {
+        console.error('❌ Erro ao buscar pixel:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Atualizar pixel
+app.put('/admin/pixels/:id', async (req, res) => {
+    try {
+        const pixelId = parseInt(req.params.id);
+        const { name, platform, pixel_id, event_source_id, access_token, test_event_code, is_active } = req.body;
+
+        if (isNaN(pixelId) || pixelId <= 0) {
+            return res.status(400).json({ error: 'ID inválido' });
+        }
+
+        // Verificar se o pixel existe
+        const checkResult = await pool.query(
+            'SELECT * FROM pixels WHERE id = $1',
+            [pixelId]
+        );
+
+        if (checkResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Pixel não encontrado' });
+        }
+
+        // Construir query dinâmica
+        const updates = [];
+        const values = [];
+        let paramCount = 1;
+
+        if (name !== undefined) {
+            updates.push(`name = $${paramCount}`);
+            values.push(name);
+            paramCount++;
+        }
+
+        if (platform !== undefined) {
+            updates.push(`platform = $${paramCount}`);
+            values.push(platform);
+            paramCount++;
+        }
+
+        if (pixel_id !== undefined) {
+            updates.push(`pixel_id = $${paramCount}`);
+            values.push(pixel_id);
+            paramCount++;
+        }
+
+        if (event_source_id !== undefined) {
+            updates.push(`event_source_id = $${paramCount}`);
+            values.push(event_source_id);
+            paramCount++;
+        }
+
+        if (access_token !== undefined) {
+            updates.push(`access_token = $${paramCount}`);
+            values.push(access_token);
+            paramCount++;
+        }
+
+        if (test_event_code !== undefined) {
+            updates.push(`test_event_code = $${paramCount}`);
+            values.push(test_event_code);
+            paramCount++;
+        }
+
+        if (is_active !== undefined) {
+            updates.push(`is_active = $${paramCount}`);
+            values.push(is_active);
+            paramCount++;
+        }
+
+        // Sempre atualizar updated_at
+        updates.push(`updated_at = CURRENT_TIMESTAMP`);
+
+        if (updates.length === 1) { // apenas updated_at
+            return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+        }
+
+        values.push(pixelId);
+        const query = `
+            UPDATE pixels 
+            SET ${updates.join(', ')}
+            WHERE id = $${paramCount}
+            RETURNING *;
+        `;
+
+        const result = await pool.query(query, values);
+
+        console.log(`✏️ Pixel atualizado: ${result.rows[0].name}`);
+
+        res.json({
+            success: true,
+            message: 'Pixel atualizado com sucesso',
+            pixel: result.rows[0]
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao atualizar pixel:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Deletar pixel
 app.delete('/admin/pixels/:id', async (req, res) => {
     try {
@@ -1020,24 +1157,294 @@ app.post('/admin/pixels', async (req, res) => {
 });
 
 // Estatísticas
+// Estatísticas completas
 app.get('/admin/stats', async (req, res) => {
     try {
-        const [clicks, sales, revenue, pixels] = await Promise.all([
+        const [clicks, salesStats, revenueStats, pixels, funnel, recentSales, topCampaigns] = await Promise.all([
+            // Total de cliques
             pool.query('SELECT COUNT(*) as count FROM clicks'),
-            pool.query('SELECT COUNT(*) as count FROM sales WHERE status = $1', ['approved']),
-            pool.query('SELECT SUM(plan_value) as total FROM sales WHERE status = $1', ['approved']),
-            pool.query('SELECT COUNT(*) as count FROM pixels WHERE is_active = TRUE')
+
+            // Estatísticas de vendas por status
+            pool.query(`
+                SELECT 
+                    status,
+                    COUNT(*) as count,
+                    SUM(plan_value) as total_value
+                FROM sales 
+                GROUP BY status
+                ORDER BY 
+                    CASE status 
+                        WHEN 'approved' THEN 1
+                        WHEN 'created' THEN 2
+                        WHEN 'pending' THEN 3
+                        ELSE 4
+                    END
+            `),
+
+            // Receita total (aprovada)
+            pool.query(`
+                SELECT 
+                    SUM(plan_value) as total_approved,
+                    COUNT(*) as count_approved,
+                    AVG(plan_value) as avg_ticket
+                FROM sales 
+                WHERE status = 'approved'
+            `),
+
+            // Pixels ativos
+            pool.query('SELECT COUNT(*) as count FROM pixels WHERE is_active = TRUE'),
+
+            // Funil de conversão (últimos 30 dias)
+            pool.query(`
+                WITH dates AS (
+                    SELECT generate_series(
+                        CURRENT_DATE - INTERVAL '30 days', 
+                        CURRENT_DATE, 
+                        '1 day'::interval
+                    )::date as date
+                ),
+                daily_clicks AS (
+                    SELECT 
+                        DATE(received_at) as date,
+                        COUNT(*) as clicks
+                    FROM clicks
+                    WHERE received_at >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY DATE(received_at)
+                ),
+                daily_sales AS (
+                    SELECT 
+                        DATE(created_at) as date,
+                        COUNT(*) as sales,
+                        SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved_sales
+                    FROM sales
+                    WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY DATE(created_at)
+                )
+                SELECT 
+                    d.date,
+                    COALESCE(dc.clicks, 0) as clicks,
+                    COALESCE(ds.sales, 0) as sales,
+                    COALESCE(ds.approved_sales, 0) as approved_sales,
+                    CASE 
+                        WHEN COALESCE(dc.clicks, 0) > 0 
+                        THEN ROUND((COALESCE(ds.sales, 0) * 100.0 / dc.clicks), 2)
+                        ELSE 0
+                    END as conversion_rate
+                FROM dates d
+                LEFT JOIN daily_clicks dc ON d.date = dc.date
+                LEFT JOIN daily_sales ds ON d.date = ds.date
+                ORDER BY d.date DESC
+                LIMIT 30
+            `),
+
+            // Vendas recentes (últimas 10)
+            pool.query(`
+                SELECT 
+                    sale_code,
+                    customer_name,
+                    customer_email,
+                    plan_name,
+                    plan_value,
+                    status,
+                    created_at,
+                    utm_source,
+                    utm_campaign
+                FROM sales
+                ORDER BY created_at DESC
+                LIMIT 10
+            `),
+
+            // Top campanhas por conversão
+            pool.query(`
+                SELECT 
+                    utm_source,
+                    utm_campaign,
+                    COUNT(DISTINCT s.sale_code) as sales_count,
+                    SUM(s.plan_value) as total_revenue,
+                    COUNT(DISTINCT c.click_id) as clicks_count,
+                    CASE 
+                        WHEN COUNT(DISTINCT c.click_id) > 0 
+                        THEN ROUND((COUNT(DISTINCT s.sale_code) * 100.0 / COUNT(DISTINCT c.click_id)), 2)
+                        ELSE 0
+                    END as conversion_rate
+                FROM sales s
+                LEFT JOIN clicks c ON s.click_id = c.click_id
+                WHERE s.utm_source IS NOT NULL 
+                    AND s.created_at >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY utm_source, utm_campaign
+                HAVING COUNT(DISTINCT s.sale_code) > 0
+                ORDER BY total_revenue DESC
+                LIMIT 10
+            `)
         ]);
 
+        // Processar estatísticas de vendas
+        const salesByStatus = salesStats.rows.reduce((acc, row) => {
+            acc[row.status] = {
+                count: parseInt(row.count),
+                value: parseFloat(row.total_value || 0)
+            };
+            return acc;
+        }, {});
+
+        // Processar funil
+        const funnelData = funnel.rows.map(row => ({
+            date: row.date.toISOString().split('T')[0],
+            clicks: parseInt(row.clicks),
+            sales: parseInt(row.sales),
+            approved_sales: parseInt(row.approved_sales),
+            conversion_rate: parseFloat(row.conversion_rate)
+        }));
+
+        // Calcular totais do funil
+        const funnelTotals = funnel.rows.reduce((acc, row) => ({
+            clicks: acc.clicks + parseInt(row.clicks),
+            sales: acc.sales + parseInt(row.sales),
+            approved_sales: acc.approved_sales + parseInt(row.approved_sales)
+        }), { clicks: 0, sales: 0, approved_sales: 0 });
+
+        // Calcular taxa de conversão geral
+        const overallConversion = funnelTotals.clicks > 0
+            ? parseFloat(((funnelTotals.sales * 100) / funnelTotals.clicks).toFixed(2))
+            : 0;
+
+        const approvedConversion = funnelTotals.clicks > 0
+            ? parseFloat(((funnelTotals.approved_sales * 100) / funnelTotals.clicks).toFixed(2))
+            : 0;
+
         res.json({
-            clicks: parseInt(clicks.rows[0].count),
-            sales: parseInt(sales.rows[0].count),
-            revenue: parseFloat(revenue.rows[0].total || 0).toFixed(2),
-            active_pixels: parseInt(pixels.rows[0].count),
-            utmify_configured: !!UTMIFY_API_KEY
+            // Totais básicos
+            totals: {
+                clicks: parseInt(clicks.rows[0].count),
+                active_pixels: parseInt(pixels.rows[0].count),
+                utmify_configured: !!UTMIFY_API_KEY
+            },
+
+            // Estatísticas de vendas
+            sales: {
+                by_status: salesByStatus,
+                total_approved: parseFloat(revenueStats.rows[0].total_approved || 0).toFixed(2),
+                count_approved: parseInt(revenueStats.rows[0].count_approved || 0),
+                avg_ticket: parseFloat(revenueStats.rows[0].avg_ticket || 0).toFixed(2),
+                pending: salesByStatus['pending']?.count || 0,
+                created: salesByStatus['created']?.count || 0,
+                approved: salesByStatus['approved']?.count || 0
+            },
+
+            // Funil de conversão
+            funnel: {
+                daily: funnelData,
+                totals: funnelTotals,
+                conversion: {
+                    overall: overallConversion,
+                    approved: approvedConversion,
+                    clicks_to_sales: funnelTotals.clicks > 0 ? funnelTotals.sales : 0,
+                    clicks_to_approved: funnelTotals.clicks > 0 ? funnelTotals.approved_sales : 0
+                }
+            },
+
+            // Vendas recentes
+            recent_sales: recentSales.rows.map(row => ({
+                sale_code: row.sale_code,
+                customer_name: row.customer_name,
+                customer_email: row.customer_email ?
+                    row.customer_email.replace(/(.{2})(.*)(@.*)/, '$1***$3') : 'N/A',
+                plan_name: row.plan_name,
+                plan_value: parseFloat(row.plan_value).toFixed(2),
+                status: row.status,
+                created_at: row.created_at,
+                utm_source: row.utm_source || 'N/A',
+                utm_campaign: row.utm_campaign || 'N/A'
+            })),
+
+            // Top campanhas
+            top_campaigns: topCampaigns.rows.map(row => ({
+                source: row.utm_source || 'N/A',
+                campaign: row.utm_campaign || 'N/A',
+                sales_count: parseInt(row.sales_count),
+                total_revenue: parseFloat(row.total_revenue).toFixed(2),
+                clicks_count: parseInt(row.clicks_count),
+                conversion_rate: parseFloat(row.conversion_rate)
+            })),
+
+            // Timestamp
+            generated_at: new Date().toISOString(),
+            period: 'last_30_days'
         });
 
     } catch (error) {
+        console.error('❌ Erro ao buscar estatísticas:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Estatísticas rápidas (para dashboard)
+app.get('/admin/stats/quick', async (req, res) => {
+    try {
+        const [today, yesterday, week] = await Promise.all([
+            // Hoje
+            pool.query(`
+                SELECT 
+                    (SELECT COUNT(*) FROM clicks WHERE DATE(received_at) = CURRENT_DATE) as clicks_today,
+                    (SELECT COUNT(*) FROM sales WHERE DATE(created_at) = CURRENT_DATE AND status = 'approved') as sales_today,
+                    (SELECT SUM(plan_value) FROM sales WHERE DATE(created_at) = CURRENT_DATE AND status = 'approved') as revenue_today
+            `),
+
+            // Ontem
+            pool.query(`
+                SELECT 
+                    (SELECT COUNT(*) FROM clicks WHERE DATE(received_at) = CURRENT_DATE - INTERVAL '1 day') as clicks_yesterday,
+                    (SELECT COUNT(*) FROM sales WHERE DATE(created_at) = CURRENT_DATE - INTERVAL '1 day' AND status = 'approved') as sales_yesterday,
+                    (SELECT SUM(plan_value) FROM sales WHERE DATE(created_at) = CURRENT_DATE - INTERVAL '1 day' AND status = 'approved') as revenue_yesterday
+            `),
+
+            // Últimos 7 dias
+            pool.query(`
+                SELECT 
+                    COUNT(*) as clicks_week,
+                    (SELECT COUNT(*) FROM sales WHERE created_at >= CURRENT_DATE - INTERVAL '7 days' AND status = 'approved') as sales_week,
+                    (SELECT SUM(plan_value) FROM sales WHERE created_at >= CURRENT_DATE - INTERVAL '7 days' AND status = 'approved') as revenue_week
+                FROM clicks 
+                WHERE received_at >= CURRENT_DATE - INTERVAL '7 days'
+            `)
+        ]);
+
+        const todayData = today.rows[0];
+        const yesterdayData = yesterday.rows[0];
+        const weekData = week.rows[0];
+
+        // Calcular crescimento
+        const salesGrowth = yesterdayData.sales_yesterday > 0 ?
+            parseFloat(((todayData.sales_today - yesterdayData.sales_yesterday) * 100 / yesterdayData.sales_yesterday).toFixed(1)) : 0;
+
+        const revenueGrowth = yesterdayData.revenue_yesterday > 0 ?
+            parseFloat(((todayData.revenue_today - yesterdayData.revenue_yesterday) * 100 / yesterdayData.revenue_yesterday).toFixed(1)) : 0;
+
+        res.json({
+            today: {
+                clicks: parseInt(todayData.clicks_today || 0),
+                sales: parseInt(todayData.sales_today || 0),
+                revenue: parseFloat(todayData.revenue_today || 0).toFixed(2)
+            },
+            yesterday: {
+                clicks: parseInt(yesterdayData.clicks_yesterday || 0),
+                sales: parseInt(yesterdayData.sales_yesterday || 0),
+                revenue: parseFloat(yesterdayData.revenue_yesterday || 0).toFixed(2)
+            },
+            week: {
+                clicks: parseInt(weekData.clicks_week || 0),
+                sales: parseInt(weekData.sales_week || 0),
+                revenue: parseFloat(weekData.revenue_week || 0).toFixed(2)
+            },
+            growth: {
+                sales: salesGrowth,
+                revenue: revenueGrowth
+            },
+            generated_at: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao buscar estatísticas rápidas:', error.message);
         res.status(500).json({ error: error.message });
     }
 });
