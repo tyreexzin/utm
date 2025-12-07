@@ -631,6 +631,34 @@ app.get('/api/webhook/apex', (req, res) => {
     });
 });
 
+// Rota de debug para ver clicks recentes
+app.get('/admin/debug/clicks', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                click_id,
+                utm_source,
+                utm_campaign,
+                utm_content,
+                ttclid,
+                received_at
+            FROM clicks 
+            ORDER BY received_at DESC 
+            LIMIT 20
+        `);
+
+        res.json({
+            success: true,
+            count: result.rows.length,
+            clicks: result.rows
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao buscar clicks:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Rota para buscar parâmetros UTM salvos
 app.get('/api/utm-params/:click_id', async (req, res) => {
     try {
