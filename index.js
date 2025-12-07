@@ -338,7 +338,6 @@ async function getSaleBySaleCode(saleCode) {
     }
 }
 
-// --- FUNÇÃO UTMIFY ---
 async function sendToUtmify(saleData, clickData) {
     if (!UTMIFY_API_KEY) {
         console.log('⚠️ UTMIFY_API_KEY não configurada');
@@ -364,7 +363,7 @@ async function sendToUtmify(saleData, clickData) {
                 .substring(0, 50)
             : 'apex-access';
 
-        // Determinar UTM parameters - usar clickData se disponível, senão usar saleData
+        // Determinar UTM parameters
         const utmSource = saleData.utm_source || clickData?.utm_source || 'direct';
         const utmMedium = saleData.utm_medium || clickData?.utm_medium || 'organic';
         const utmCampaign = saleData.utm_campaign || clickData?.utm_campaign || 'default';
@@ -377,28 +376,28 @@ async function sendToUtmify(saleData, clickData) {
         console.log('- Valor:', saleData.plan_value);
         console.log('- Status UTMify:', utmifyStatus);
         console.log('- É teste?', isTest);
-        console.log('📊 PARÂMETROS DE TRACKING:');
-        console.log('- UTM Source:', utmSource);
-        console.log('- UTM Medium:', utmMedium);
-        console.log('- UTM Campaign:', utmCampaign);
-        console.log('- UTM Content:', utmContent);
-        console.log('- UTM Term:', utmTerm);
-        console.log('- Click ID associado:', clickData?.click_id || 'Nenhum');
-        console.log('- Landing Page original:', clickData?.landing_page || 'Não disponível');
-        console.log('- Referrer:', clickData?.referrer || 'Não disponível');
+        console.log('- UTMs:', { utmSource, utmMedium, utmCampaign, utmContent, utmTerm });
+
+        // Formatador obrigatório da UTMify
+        const formatDate = (d) =>
+            new Date(d).toISOString().replace("T", " ").substring(0, 19);
 
         const payload = {
             orderId: saleData.sale_code,
             platform: saleData.payment_platform || 'ApexVips',
             paymentMethod: saleData.payment_method || 'unknown',
             status: utmifyStatus,
-            createdAt: sale.created_at
-                ? new Date(sale.created_at).toISOString().replace('T', ' ').substring(0, 19)
-                : now.toISOString().replace('T', ' ').substring(0, 19),
 
-            approvedDate: (sale.status === "approved" && sale.approved_at)
-                ? new Date(sale.approved_at).toISOString().replace('T', ' ').substring(0, 19)
-                : null,
+            // DATAS CORRETAS
+            createdAt: saleData.createdAt
+                ? saleData.createdAt
+                : (saleData.created_at ? formatDate(saleData.created_at) : formatDate(now)),
+
+            approvedDate:
+                saleData.status === "approved" && saleData.approved_at
+                    ? formatDate(saleData.approved_at)
+                    : null,
+
             customer: {
                 name: saleData.customer_name || 'Cliente',
                 email: saleData.customer_email || "naoinformado@utmify.com",
@@ -406,14 +405,16 @@ async function sendToUtmify(saleData, clickData) {
                 document: saleData.customer_document ? saleData.customer_document.replace(/\D/g, '') : null,
                 ip: saleData.ip || clickData?.ip || '0.0.0.0'
             },
+
             products: [{
                 id: planId,
                 planId: planId,
-                name: saleData.plan_name || 'Acesso Apex Vips',
-                planName: saleData.plan_name || 'Acesso Apex Vips',
+                name: saleData.plan_name || 'Acesso VIP',
+                planName: saleData.plan_name || 'Acesso VIP',
                 quantity: 1,
                 priceInCents: Math.round((saleData.plan_value || 0) * 100)
             }],
+
             trackingParameters: {
                 utm_source: utmSource,
                 utm_medium: utmMedium,
@@ -421,12 +422,14 @@ async function sendToUtmify(saleData, clickData) {
                 utm_content: utmContent,
                 utm_term: utmTerm
             },
+
             commission: {
                 totalPriceInCents: Math.round((saleData.plan_value || 0) * 100),
                 gatewayFeeInCents: 0,
                 userCommissionInCents: Math.round((saleData.plan_value || 0) * 100),
                 currency: saleData.currency || 'BRL'
             },
+
             isTest: isTest
         };
 
@@ -444,11 +447,9 @@ async function sendToUtmify(saleData, clickData) {
             }
         );
 
-        // MELHORIA: Log completo da resposta
-        console.log(`✅ UTMify Response (${response.status}):`, JSON.stringify(response.data, null, 2));
-        console.log(`✅ UTMify: Venda ${saleData.sale_code} enviada (${utmifyStatus})`);
+        console.log(`✅ UTMify Response (${response.status}):`, response.data);
 
-        // Marcar como enviado no banco
+        // Atualizar banco
         await pool.query(
             'UPDATE sales SET utmify_sent = TRUE WHERE sale_code = $1',
             [saleData.sale_code]
@@ -457,17 +458,10 @@ async function sendToUtmify(saleData, clickData) {
         return { success: true, data: response.data };
 
     } catch (error) {
-        // MELHORIA: Log mais detalhado
         console.error('❌ Erro ao enviar para UTMify:', {
             status: error.response?.status,
-            statusText: error.response?.statusText,
             data: error.response?.data,
-            message: error.message,
-            config: {
-                url: error.config?.url,
-                method: error.config?.method,
-                data: error.config?.data ? JSON.parse(error.config.data) : null
-            }
+            message: error.message
         });
         return { success: false, error: error.message };
     }
