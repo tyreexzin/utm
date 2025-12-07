@@ -452,22 +452,28 @@ async function sendToUtmify(saleData, clickData) {
 async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
     const url = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 
+    // 🔍 DEBUG DE ENTRADA
+    console.log("\n================= 📡 TIKTOK EVENT DEBUG =================");
+    console.log("🧩 Pixel Usado:", pixel.name, `(${pixel.platform})`);
+    console.log("🆔 Pixel ID:", pixel.pixel_id);
+    console.log("🔵 event_source_id:", pixel.event_source_id || pixel.pixel_id);
+    console.log("💵 Valor da compra:", eventData.plan_value);
+    console.log("👤 Email:", eventData.customer_email);
+    console.log("📱 Telefone:", eventData.customer_phone);
+    console.log("🧾 Documento:", eventData.customer_document);
+    console.log("🌐 Landing:", clickData?.landing_page);
+    console.log("↩️ Referrer:", clickData?.referrer);
+    console.log("📌 TTCLID recebido:", clickData?.ttclid || "❌ NÃO VEIO TTCLID!");
+    console.log("===========================================================\n");
+
+    // Hash do usuário
     const user = {};
+    if (eventData.customer_email) user.email = hashData(eventData.customer_email);
+    if (eventData.customer_phone) user.phone = hashData(eventData.customer_phone);
+    if (eventData.customer_document) user.external_id = hashData(eventData.customer_document);
 
-    if (eventData.customer_email)
-        user.email = hashData(eventData.customer_email);
-
-    if (eventData.customer_phone)
-        user.phone = hashData(eventData.customer_phone.replace(/\D/g, ''));
-
-    if (eventData.customer_document)
-        user.external_id = hashData(eventData.customer_document.replace(/\D/g, ''));
-
-    if (clickData?.ip)
-        user.ip = clickData.ip;
-
-    if (eventData.user_agent)
-        user.user_agent = eventData.user_agent;
+    if (clickData?.ip) user.ip = clickData.ip;
+    if (eventData.user_agent) user.user_agent = eventData.user_agent;
 
     const payload = {
         event_source: "web",
@@ -477,13 +483,10 @@ async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
                 event: "Purchase",
                 event_time: Math.floor(Date.now() / 1000),
                 event_id: eventData.sale_code,
-
                 user,
-
                 properties: {
                     currency: eventData.currency || "BRL",
-                    value: eventData.plan_value, // TikTok exige valor em REAIS, não centavos
-
+                    value: eventData.plan_value,
                     contents: [
                         {
                             content_id: "vip_access",
@@ -492,51 +495,59 @@ async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
                             price: eventData.plan_value
                         }
                     ],
-
                     content_type: "product",
-
-                    // OBRIGATÓRIO PARA RASTREAMENTO DE ANÚNCIOS:
-                    context: clickData?.ttclid ? {
+                },
+                page: {
+                    url: clickData?.landing_page || "https://tracking.com",
+                    referrer: clickData?.referrer || "",
+                },
+                context: clickData?.ttclid
+                    ? {
                         ad: {
                             callback: clickData.ttclid
                         }
-                    } : undefined
-                },
-
-                page: {
-                    url: clickData?.landing_page || "https://tracking.com",
-                    referrer: clickData?.referrer || ""
-                }
+                    }
+                    : undefined
             }
         ]
     };
 
-    const clean = JSON.parse(JSON.stringify(payload));
+    const cleanPayload = JSON.parse(JSON.stringify(payload));
 
     if (isTest) {
-        clean.test_event_code = pixel.test_event_code || "TEST54815";
+        cleanPayload.test_event_code = pixel.test_event_code || "TEST54815";
     }
 
-    try {
-        console.log("📤 Enviando TikTok FIX:", JSON.stringify(clean, null, 2));
+    // 📦 Mostrar payload final
+    console.log("📦 PAYLOAD FINAL ENVIADO AO TIKTOK:");
+    console.log(JSON.stringify(cleanPayload, null, 2));
 
-        const response = await axios.post(url, clean, {
+    try {
+        const response = await axios.post(url, cleanPayload, {
             headers: {
                 "Access-Token": pixel.access_token,
                 "Content-Type": "application/json"
             }
         });
 
-        console.log("📌 TikTok OK:", response.data);
+        // 🟩 Resposta do TikTok
+        console.log("\n🟩 RESPOSTA DO TIKTOK:");
+        console.log(JSON.stringify(response.data, null, 2));
+        console.log("===========================================================\n");
 
-        return { success: true };
+        return { success: true, data: response.data };
 
     } catch (err) {
-        console.error("🔥 ERRO TikTok:", err.response?.data || err.message);
+        // ❌ ERRO DETALHADO
+        console.log("\n🔥🔥🔥 ERRO AO ENVIAR PARA O TIKTOK 🔥🔥🔥");
+        console.log("📌 STATUS:", err.response?.status);
+        console.log("📌 DATA:", JSON.stringify(err.response?.data, null, 2));
+        console.log("📌 MESSAGE:", err.message);
+        console.log("===========================================================\n");
+
         return { success: false, error: err.message };
     }
 }
-
 
 // Enviar evento para Facebook - CORRIGIDA
 async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
