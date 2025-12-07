@@ -392,9 +392,12 @@ async function sendToUtmify(saleData, clickData) {
             platform: saleData.payment_platform || 'ApexVips',
             paymentMethod: saleData.payment_method || 'unknown',
             status: utmifyStatus,
-            createdAt: now.toISOString().replace('T', ' ').substring(0, 19),
-            approvedDate: utmifyStatus === 'paid'
-                ? now.toISOString().replace('T', ' ').substring(0, 19)
+            createdAt: sale.created_at
+                ? new Date(sale.created_at).toISOString().replace('T', ' ').substring(0, 19)
+                : now.toISOString().replace('T', ' ').substring(0, 19),
+
+            approvedDate: (sale.status === "approved" && sale.approved_at)
+                ? new Date(sale.approved_at).toISOString().replace('T', ' ').substring(0, 19)
                 : null,
             customer: {
                 name: saleData.customer_name || 'Cliente',
