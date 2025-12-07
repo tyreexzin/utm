@@ -188,6 +188,26 @@ function hashData(data) {
         .digest('hex');
 }
 
+function normalizePlanValue(value, source = 'apex') {
+    if (!value && value !== 0) return 0;
+
+    let numValue;
+    if (typeof value === 'string') {
+        numValue = parseFloat(value.replace(',', '.'));
+    } else {
+        numValue = parseFloat(value);
+    }
+
+    if (isNaN(numValue)) return 0;
+
+    // CORREÇÃO: Apex Vips envia em centavos (ex: 4990 = R$49,90)
+    if (source === 'apex' && numValue > 10000) {
+        return numValue / 100; // Converte para reais
+    }
+
+    return numValue;
+}
+
 // --- FUNÇÕES DO BANCO ---
 
 // 1. Salvar clique
@@ -1350,6 +1370,12 @@ async function processApexEvent(eventData) {
 
         const isUpdate = existing.rows.length > 0;
 
+        // 🔥 CORREÇÃO: Usar normalizePlanValue DENTRO da função
+        const normalizedPlanValue = normalizePlanValue(
+            eventData.transaction?.plan_value,
+            'apex'
+        ) || existing.rows[0]?.plan_value || 0;
+
         // 4️⃣ Criar objeto base da venda
         const baseSaleData = {
             sale_code: saleCode,
@@ -1365,9 +1391,7 @@ async function processApexEvent(eventData) {
             customer_phone: eventData.customer?.phone || null,
             customer_document: eventData.customer?.tax_id || null,
             plan_name: eventData.transaction?.plan_name || existing.rows[0]?.plan_name,
-            plan_value: eventData.transaction?.plan_value
-                ? eventData.transaction.plan_value / 100
-                : existing.rows[0]?.plan_value || 0,
+            plan_value: normalizedPlanValue, // 🔥 Usando o valor normalizado
             currency: eventData.transaction?.currency || "BRL",
             payment_platform: eventData.transaction?.payment_platform || "ApexVips",
             payment_method: eventData.transaction?.payment_method || "pix",
@@ -1487,36 +1511,6 @@ async function findClickByMultipleCriteria(clickId) {
         return null;
     }
 }
-
-function normalizePlanValue(value, source = 'apex') {
-    if (!value && value !== 0) return 0;
-
-    let numValue;
-    if (typeof value === 'string') {
-        numValue = parseFloat(value.replace(',', '.'));
-    } else {
-        numValue = parseFloat(value);
-    }
-
-    if (isNaN(numValue)) return 0;
-
-    // CORREÇÃO: Apex Vips envia em centavos (ex: 4990 = R$49,90)
-    if (source === 'apex' && numValue > 10000) {
-        return numValue / 100; // Converte para reais
-    }
-
-    return numValue;
-}
-
-// Usar no processApexEvent:
-const baseSaleData = {
-    // ... outros campos
-    plan_value: normalizePlanValue(
-        eventData.transaction?.plan_value,
-        'apex'
-    ) || existing.rows[0]?.plan_value || 0,
-    // ...
-};
 
 app.post('/admin/cleanup-test-data', async (req, res) => {
     try {
