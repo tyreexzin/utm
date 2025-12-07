@@ -631,6 +631,45 @@ app.get('/api/webhook/apex', (req, res) => {
     });
 });
 
+// Rota para buscar parâmetros UTM salvos
+app.get('/api/utm-params/:click_id', async (req, res) => {
+    try {
+        const clickId = req.params.click_id;
+
+        // Buscar do banco de dados
+        const result = await pool.query(
+            'SELECT utm_source, utm_medium, utm_campaign, utm_content, utm_term, utm_id, ttclid FROM clicks WHERE click_id = $1',
+            [clickId]
+        );
+
+        if (result.rows.length > 0) {
+            res.json({
+                success: true,
+                click_id: clickId,
+                utm_params: {
+                    utm_source: result.rows[0].utm_source,
+                    utm_medium: result.rows[0].utm_medium,
+                    utm_campaign: result.rows[0].utm_campaign,
+                    utm_content: result.rows[0].utm_content,
+                    utm_term: result.rows[0].utm_term,
+                    utm_id: result.rows[0].utm_id,
+                    ttclid: result.rows[0].ttclid
+                }
+            });
+        } else {
+            res.json({
+                success: false,
+                message: 'Click não encontrado',
+                click_id: clickId
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ Erro ao buscar UTM params:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Rota 1: Health Check
 app.get('/', (req, res) => {
     res.json({
