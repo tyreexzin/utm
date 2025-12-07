@@ -1410,6 +1410,59 @@ app.get('/redirect', async (req, res) => {
     }
 });
 
+// Recuperar UTM de vendas antigas baseado no sale_code e padrões reais do seu banco
+async function recoverUTM(sale) {
+    let res;
+
+    // 0. Sempre tratar sale_code como possível click_id real
+    res = await pool.query(
+        "SELECT * FROM clicks WHERE click_id = $1 LIMIT 1",
+        [sale.sale_code]
+    );
+    if (res.rows.length > 0) return res.rows[0];
+
+    // 1. Se a venda tiver click_id salvo, tente usar
+    if (sale.click_id) {
+        res = await pool.query(
+            "SELECT * FROM clicks WHERE click_id = $1 LIMIT 1",
+            [sale.click_id]
+        );
+        if (res.rows.length > 0) return res.rows[0];
+    }
+
+    // 2. Buscar click parcialmente igual ao sale_code
+    res = await pool.query(
+        "SELECT * FROM clicks WHERE click_id LIKE $1 LIMIT 1",
+        [`%${sale.sale_code}%`]
+    );
+    if (res.rows.length > 0) return res.rows[0];
+
+    // 3. Buscar por utm_id
+    res = await pool.query(
+        "SELECT * FROM clicks WHERE utm_id = $1 LIMIT 1",
+        [sale.sale_code]
+    );
+    if (res.rows.length > 0) return res.rows[0];
+
+    // 4. Buscar por utm_content (alguns setups salvam id ali)
+    res = await pool.query(
+        "SELECT * FROM clicks WHERE utm_content LIKE $1 LIMIT 1",
+        [`%${sale.sale_code}%`]
+    );
+    if (res.rows.length > 0) return res.rows[0];
+
+    // 5. (Opcional) Buscar clique por IP do usuário
+    if (sale.ip) {
+        res = await pool.query(
+            "SELECT * FROM clicks WHERE ip = $1 ORDER BY received_at DESC LIMIT 1",
+            [sale.ip]
+        );
+        if (res.rows.length > 0) return res.rows[0];
+    }
+
+    return null;
+}
+
 // --- ROTAS DE ADMIN ---
 
 // Listar pixels
@@ -1456,24 +1509,19 @@ app.post('/admin/resend-utmify', async (req, res) => {
 
         for (const sale of sales) {
             try {
-                let clickData = null;
-                if (sale.click_id) {
-                    const clickRes = await pool.query(
-                        'SELECT * FROM clicks WHERE click_id = $1 LIMIT 1',
-                        [sale.click_id]
-                    );
-                    if (clickRes.rows.length > 0) clickData = clickRes.rows[0];
-                }
+                // Recuperação avançada de UTMs
+                let clickData = await recoverUTM(sale);
 
-                // 🔥 regra definitiva:
-                // - approved => enviar "paid" (somente)
-                // - created => enviar "waiting_payment"
+                // Se não tem click_id na venda, usar o sale_code como click_id real
+                const click_id = sale.click_id ? sale.click_id : sale.sale_code;
+
+                // Status para UTMify
                 const utmifyStatus =
                     sale.status === "approved" ? "paid" : "waiting_payment";
 
                 const saleData = {
                     sale_code: sale.sale_code,
-                    click_id: sale.click_id,
+                    click_id: click_id,
 
                     customer_name: sale.customer_name,
                     customer_email: sale.customer_email,
@@ -1489,11 +1537,12 @@ app.post('/admin/resend-utmify', async (req, res) => {
                     ip: sale.ip || clickData?.ip || "0.0.0.0",
                     user_agent: sale.user_agent || "Reprocess/1.0",
 
-                    utm_source: sale.utm_source || clickData?.utm_source || null,
-                    utm_medium: sale.utm_medium || clickData?.utm_medium || null,
-                    utm_campaign: sale.utm_campaign || clickData?.utm_campaign || null,
-                    utm_content: sale.utm_content || clickData?.utm_content || "",
-                    utm_term: sale.utm_term || clickData?.utm_term || "",
+                    // UTMs recuperadas corretamente
+                    utm_source: clickData?.utm_source || sale.utm_source || null,
+                    utm_medium: clickData?.utm_medium || sale.utm_medium || null,
+                    utm_campaign: clickData?.utm_campaign || sale.utm_campaign || null,
+                    utm_content: clickData?.utm_content || sale.utm_content || "",
+                    utm_term: clickData?.utm_term || sale.utm_term || "",
 
                     status: utmifyStatus,
 
@@ -1507,16 +1556,16 @@ app.post('/admin/resend-utmify', async (req, res) => {
                             : null
                 };
 
-                const result = await sendToUtmify(saleData, clickData);
+                const response = await sendToUtmify(saleData, clickData);
 
                 summary.details.push({
                     sale_code: sale.sale_code,
                     status: sale.status,
-                    utmify_status: result.success ? "success" : "failed",
-                    error: result.error || null
+                    utmify_status: response.success ? "success" : "failed",
+                    error: response.error || null
                 });
 
-                if (result.success) summary.success++;
+                if (response.success) summary.success++;
                 else summary.failed++;
 
             } catch (innerError) {
