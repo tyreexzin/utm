@@ -189,22 +189,48 @@ function hashData(data) {
 }
 
 function normalizePlanValue(value, source = 'apex') {
-    if (!value && value !== 0) return 0;
+    if (!value && value !== 0) {
+        console.log(`🔍 normalizePlanValue: valor nulo ou undefined`);
+        return 0;
+    }
+
+    console.log(`🔍 DEBUG VALOR INICIAL:`, {
+        valor: value,
+        tipo: typeof value,
+        fonte: source
+    });
 
     let numValue;
     if (typeof value === 'string') {
-        numValue = parseFloat(value.replace(',', '.'));
+        // Remove R$, pontos como separador de milhar, espaços
+        const cleaned = value
+            .replace(/[R$\s]/g, '')  // Remove R$ e espaços
+            .replace(/\./g, '')       // Remove pontos (separadores de milhar)
+            .replace(',', '.');       // Converte vírgula decimal para ponto
+
+        numValue = parseFloat(cleaned);
+        console.log(`🔍 STRING LIMPA: "${value}" → "${cleaned}" → ${numValue}`);
     } else {
         numValue = parseFloat(value);
+        console.log(`🔍 NUMÉRICO DIRETO: ${value} → ${numValue}`);
     }
 
-    if (isNaN(numValue)) return 0;
-
-    // CORREÇÃO: Apex Vips envia em centavos (ex: 4990 = R$49,90)
-    if (source === 'apex' && numValue > 10000) {
-        return numValue / 100; // Converte para reais
+    if (isNaN(numValue)) {
+        console.log(`❌ VALOR INVÁLIDO: ${value} retornou NaN`);
+        return 0;
     }
 
+    // Apex Vips envia em centavos (ex: 4990 = R$49,90)
+    if (source === 'apex') {
+        // Se o valor for maior que 100 e não tiver casas decimais, provavelmente está em centavos
+        if (numValue > 100 && numValue === Math.floor(numValue)) {
+            const emReais = numValue / 100;
+            console.log(`💰 CONVERTIDO CENTAVOS→REAIS: ${numValue} → ${emReais}`);
+            return emReais;
+        }
+    }
+
+    console.log(`✅ VALOR FINAL: ${numValue}`);
     return numValue;
 }
 
@@ -385,6 +411,7 @@ async function getSaleBySaleCode(saleCode) {
 
 async function sendToUtmify(saleData, clickData) {
     console.log(`📤 ENVIANDO PARA UTMIFY: ${saleData.sale_code}`);
+    console.log(`💰 VALOR RECEBIDO: ${saleData.plan_value} (tipo: ${typeof saleData.plan_value})`);
 
     if (!UTMIFY_API_KEY) {
         console.log('⚠️ UTMIFY_API_KEY não configurada');
@@ -403,6 +430,50 @@ async function sendToUtmify(saleData, clickData) {
         } else {
             utmifyStatus = saleData.status;
         }
+
+        // DEBUG DETALHADO DO VALOR
+        console.log('🔍 DEBUG DETALHADO DO VALOR UTMIFY:');
+        console.log('- Valor bruto:', saleData.plan_value);
+        console.log('- Tipo:', typeof saleData.plan_value);
+
+        // CORREÇÃO CRÍTICA: Converter para número corretamente
+        let valorNumerico;
+        if (typeof saleData.plan_value === 'string') {
+            // Remove caracteres não numéricos exceto ponto, vírgula e hífen
+            const limpo = saleData.plan_value
+                .replace(/[^\d,.-]/g, '')  // Remove tudo exceto números, vírgula, ponto e hífen
+                .replace(/\./g, '')        // Remove pontos (separadores de milhar)
+                .replace(',', '.');        // Converte vírgula decimal para ponto
+
+            valorNumerico = parseFloat(limpo);
+            console.log('- String limpa:', limpo);
+        } else {
+            valorNumerico = parseFloat(saleData.plan_value);
+        }
+
+        if (isNaN(valorNumerico)) {
+            console.error('❌ ERRO: Não foi possível converter valor para número:', saleData.plan_value);
+            valorNumerico = 0;
+        }
+
+        console.log('- Valor numérico:', valorNumerico);
+
+        // CORREÇÃO: UTMify espera valor em centavos
+        // Primeiro garante que estamos lidando com reais (não centavos)
+        let valorEmReais = valorNumerico;
+
+        // Se o valor for muito grande (ex: 189000) e parece ser em centavos, converte para reais
+        if (valorEmReais > 1000 && valorEmReais === Math.floor(valorEmReais)) {
+            console.log('⚠️ Valor parece estar em centavos, convertendo para reais...');
+            valorEmReais = valorEmReais / 100;
+            console.log(`- Convertido: ${valorNumerico} → ${valorEmReais}`);
+        }
+
+        const priceInCents = Math.round(valorEmReais * 100);
+
+        console.log('- Valor em reais:', valorEmReais.toFixed(2));
+        console.log('- Em centavos (para UTMify):', priceInCents);
+        console.log('- Equivalente: R$', (priceInCents / 100).toFixed(2));
 
         // CORREÇÃO: Função melhorada para datas
         const formatUTCDate = (dateInput) => {
@@ -474,9 +545,6 @@ async function sendToUtmify(saleData, clickData) {
             }
         }
 
-        // Garantir valores em centavos
-        const priceInCents = Math.round(parseFloat(saleData.plan_value || 0) * 100);
-
         const payload = {
             orderId: saleData.sale_code,
             platform: saleData.payment_platform || "ApexVips",
@@ -529,6 +597,8 @@ async function sendToUtmify(saleData, clickData) {
             payload.isTest = true;
         }
 
+        console.log('📦 Payload UTMify:', JSON.stringify(payload, null, 2));
+
         const response = await axios.post(
             "https://api.utmify.com.br/api-credentials/orders",
             payload,
@@ -546,10 +616,13 @@ async function sendToUtmify(saleData, clickData) {
             [saleData.sale_code]
         );
 
+        console.log(`✅ UTMify: Evento enviado com sucesso! Valor: R$ ${(priceInCents / 100).toFixed(2)}`);
+
         return { success: true, data: response.data };
 
     } catch (err) {
         console.error("❌ Erro UTMify:", err.response?.data || err.message);
+        console.error("📦 Payload que falhou:", JSON.stringify(payload, null, 2));
         return { success: false, error: err.message };
     }
 }
@@ -1346,7 +1419,7 @@ async function processApexEvent(eventData) {
     console.log("=".repeat(50) + "\n");
 
     try {
-        console.log("\n💰 PROCESSANDO EVENTO APEX:", eventData.event);
+        console.log("💰 PROCESSANDO EVENTO APEX:", eventData.event);
 
         // 1️⃣ Capturar datas
         const timestampBR = eventData.timestamp;
@@ -1362,6 +1435,8 @@ async function processApexEvent(eventData) {
             eventData.transaction?.external_transaction_id ||
             `APEX_${eventData.timestamp}`;
 
+        console.log(`📝 Sale Code identificado: ${saleCode}`);
+
         // 3️⃣ Buscar venda anterior
         const existing = await pool.query(
             "SELECT * FROM sales WHERE sale_code = $1 LIMIT 1",
@@ -1369,12 +1444,21 @@ async function processApexEvent(eventData) {
         );
 
         const isUpdate = existing.rows.length > 0;
+        console.log(`🔄 É atualização? ${isUpdate ? 'Sim' : 'Não'}`);
 
         // 🔥 CORREÇÃO: Usar normalizePlanValue DENTRO da função
+        console.log(`🔍 VALOR DO WEBHOOK APEX: ${eventData.transaction?.plan_value}`);
+        console.log(`📊 Tipo do valor original: ${typeof eventData.transaction?.plan_value}`);
+
         const normalizedPlanValue = normalizePlanValue(
             eventData.transaction?.plan_value,
             'apex'
         ) || existing.rows[0]?.plan_value || 0;
+
+        console.log(`💰 VALOR NORMALIZADO: ${normalizedPlanValue}`);
+        console.log(`📈 Tipo do valor normalizado: ${typeof normalizedPlanValue}`);
+        console.log(`💎 Valor em reais: R$ ${normalizedPlanValue.toFixed(2)}`);
+        console.log(`🔢 Valor em centavos: ${Math.round(normalizedPlanValue * 100)}`);
 
         // 4️⃣ Criar objeto base da venda
         const baseSaleData = {
@@ -1414,6 +1498,12 @@ async function processApexEvent(eventData) {
             utm_term: null
         };
 
+        console.log(`📋 Dados base da venda criados:`);
+        console.log(`- Cliente: ${baseSaleData.customer_name}`);
+        console.log(`- Plano: ${baseSaleData.plan_name}`);
+        console.log(`- Valor: R$ ${baseSaleData.plan_value}`);
+        console.log(`- Status: ${baseSaleData.status}`);
+
         // 5️⃣ Recuperar UTM real
         const clickData = await recoverUTM(baseSaleData);
         console.log("\n🔍 RESULTADO recoverUTM:");
@@ -1421,11 +1511,16 @@ async function processApexEvent(eventData) {
         if (clickData) {
             console.log("- Click ID:", clickData.click_id);
             console.log("- TTCLID:", clickData.ttclid || "❌ AUSENTE");
+            console.log("- FB Click ID:", clickData.fbclid || "❌ AUSENTE");
             console.log("- UTMs:", {
                 source: clickData.utm_source,
                 campaign: clickData.utm_campaign,
-                medium: clickData.utm_medium
+                medium: clickData.utm_medium,
+                content: clickData.utm_content,
+                term: clickData.utm_term
             });
+        } else {
+            console.log("⚠️ Nenhum click associado encontrado");
         }
 
         // ====================================================
@@ -1434,6 +1529,7 @@ async function processApexEvent(eventData) {
         const hasRealUTM = clickData?.utm_source || baseSaleData.utm_source;
 
         if (!hasRealUTM) {
+            console.log("⚠️ Nenhuma UTM encontrada, usando fallback 'mailing'");
             baseSaleData.utm_source = "direct";
             baseSaleData.utm_medium = "internal";
             baseSaleData.utm_campaign = "mailing";
@@ -1443,6 +1539,7 @@ async function processApexEvent(eventData) {
 
         // Se click tiver UTM válida → usa ela
         if (clickData?.utm_source) {
+            console.log("✅ UTMs reais encontradas, usando dados do click");
             baseSaleData.utm_source = clickData.utm_source;
             baseSaleData.utm_medium = clickData.utm_medium;
             baseSaleData.utm_campaign = clickData.utm_campaign;
@@ -1450,28 +1547,60 @@ async function processApexEvent(eventData) {
             baseSaleData.utm_term = clickData.utm_term;
         }
 
+        console.log(`🎯 UTMs finais para a venda:`);
+        console.log(`- source: ${baseSaleData.utm_source}`);
+        console.log(`- campaign: ${baseSaleData.utm_campaign}`);
+        console.log(`- medium: ${baseSaleData.utm_medium}`);
+
         // 6️⃣ Salvar no banco
-        await saveSale({
+        const saveResult = await saveSale({
             ...baseSaleData,
             approved_at: baseSaleData.approved_at
         });
 
         console.log("💾 VENDA SALVA/ATUALIZADA:", saleCode);
+        console.log(`- ID no banco: ${saveResult.id}`);
+        console.log(`- Valor salvo: R$ ${baseSaleData.plan_value}`);
 
         // 7️⃣ Enviar para UTMify
+        console.log("\n📤 ENVIANDO PARA UTMIFY...");
         const utmRes = await sendToUtmify(baseSaleData, clickData);
-        console.log("📤 UTMIFY RESULTADO:", utmRes);
+        console.log("📤 UTMIFY RESULTADO:");
+        console.log(`- Sucesso: ${utmRes.success}`);
+        if (utmRes.error) {
+            console.log(`- Erro: ${utmRes.error}`);
+        }
 
         // 8️⃣ Enviar para TikTok/Facebook somente se approved
         if (baseSaleData.status === "approved") {
-            console.log("📣 Enviando eventos de pixel...");
-            await processPixelEvents(baseSaleData, clickData, false);
+            console.log("\n📣 Enviando eventos de pixel...");
+            const pixelResults = await processPixelEvents(baseSaleData, clickData, false);
+
+            console.log("🎯 Resultados dos Pixels:");
+            pixelResults.forEach(result => {
+                console.log(`- ${result.platform}: ${result.success ? '✅' : '❌'} ${result.error || 'Sucesso'}`);
+            });
+        } else {
+            console.log(`⏸️ Status não é 'approved' (${baseSaleData.status}), pulando pixels`);
         }
 
-        console.log("✅ EVENTO APEX PROCESSADO COM SUCESSO!");
+        console.log("\n✅ EVENTO APEX PROCESSADO COM SUCESSO!");
+        console.log(`📊 Resumo:`);
+        console.log(`- Código: ${saleCode}`);
+        console.log(`- Valor: R$ ${baseSaleData.plan_value.toFixed(2)}`);
+        console.log(`- Status: ${baseSaleData.status}`);
+        console.log(`- UTM Source: ${baseSaleData.utm_source}`);
+        console.log(`- UTMify: ${utmRes.success ? '✅ Enviado' : '❌ Falhou'}`);
 
     } catch (err) {
-        console.error("❌ ERRO DETALHADO:", err);
+        console.error("\n❌ ERRO DETALHADO NO PROCESSAMENTO APEX:");
+        console.error("Mensagem:", err.message);
+        console.error("Stack:", err.stack);
+
+        if (err.response) {
+            console.error("Response data:", err.response.data);
+            console.error("Response status:", err.response.status);
+        }
     }
 }
 
