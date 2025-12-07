@@ -261,6 +261,14 @@ async function getClick(clickId) {
 
 // 3. Salvar venda (ATUALIZADA)
 async function saveSale(data) {
+    // CORREÇÃO: Garantir que plan_value seja número
+    const planValue = typeof data.plan_value === 'string'
+        ? parseFloat(data.plan_value.replace(',', '.'))
+        : parseFloat(data.plan_value || 0);
+
+    // CORREÇÃO: Se vem da Apex Vips (em centavos), converter
+    const finalPlanValue = planValue > 10000 ? planValue / 100 : planValue;
+
     const query = `
         INSERT INTO sales (
             sale_code, click_id, customer_name, customer_email, customer_phone,
@@ -273,7 +281,13 @@ async function saveSale(data) {
             approved_at = EXCLUDED.approved_at,
             customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
             customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
-            plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value)
+            plan_value = COALESCE(EXCLUDED.plan_value, sales.plan_value),
+            utm_source = COALESCE(EXCLUDED.utm_source, sales.utm_source),
+            utm_medium = COALESCE(EXCLUDED.utm_medium, sales.utm_medium),
+            utm_campaign = COALESCE(EXCLUDED.utm_campaign, sales.utm_campaign),
+            utm_content = COALESCE(EXCLUDED.utm_content, sales.utm_content),
+            utm_term = COALESCE(EXCLUDED.utm_term, sales.utm_term),
+            click_id = COALESCE(EXCLUDED.click_id, sales.click_id)
         RETURNING id;
     `;
 
@@ -285,7 +299,7 @@ async function saveSale(data) {
         data.customer_phone,
         data.customer_document,
         data.plan_name || 'Plano Apex',
-        data.plan_value || 0,
+        finalPlanValue, // CORREÇÃO: Valor convertido
         data.currency || 'BRL',
         data.payment_platform || 'apexvips',
         data.payment_method || 'unknown',
@@ -350,6 +364,8 @@ async function getSaleBySaleCode(saleCode) {
 }
 
 async function sendToUtmify(saleData, clickData) {
+    console.log(`📤 ENVIANDO PARA UTMIFY: ${saleData.sale_code}`);
+
     if (!UTMIFY_API_KEY) {
         console.log('⚠️ UTMIFY_API_KEY não configurada');
         return { success: false, error: 'API key não configurada' };
@@ -358,23 +374,88 @@ async function sendToUtmify(saleData, clickData) {
     try {
         const isTest = saleData.sale_code.includes('TEST');
 
-        const utmifyStatus =
-            saleData.status === 'approved' || saleData.status === 'paid'
-                ? 'paid'
-                : 'waiting_payment';
+        // Mapear status
+        let utmifyStatus;
+        if (saleData.status === 'approved' || saleData.status === 'paid') {
+            utmifyStatus = 'paid';
+        } else if (saleData.status === 'created' || saleData.status === 'pending') {
+            utmifyStatus = 'waiting_payment';
+        } else {
+            utmifyStatus = saleData.status;
+        }
 
-        const planId = saleData.plan_name
-            ? saleData.plan_name.toLowerCase()
-                .replace(/[^a-z0-9]/g, '-')
-                .replace(/-+/g, '-')
-                .replace(/^-|-$/g, '')
-            : "plan";
+        // CORREÇÃO: Função melhorada para datas
+        const formatUTCDate = (dateInput) => {
+            if (!dateInput) return null;
 
-        const utmSource = saleData.utm_source || clickData?.utm_source || null;
-        const utmMedium = saleData.utm_medium || clickData?.utm_medium || null;
-        const utmCampaign = saleData.utm_campaign || clickData?.utm_campaign || null;
-        const utmContent = saleData.utm_content || clickData?.utm_content || null;
-        const utmTerm = saleData.utm_term || clickData?.utm_term || null;
+            let date;
+
+            // Se for timestamp em segundos (do webhook)
+            if (typeof dateInput === 'number' && dateInput < 10000000000) {
+                date = new Date(dateInput * 1000);
+            }
+            // Se for string de data
+            else if (typeof dateInput === 'string') {
+                date = new Date(dateInput);
+            }
+            // Se for objeto Date
+            else if (dateInput instanceof Date) {
+                date = dateInput;
+            }
+            // Se for número em ms
+            else if (typeof dateInput === 'number') {
+                date = new Date(dateInput);
+            }
+            else {
+                return null;
+            }
+
+            if (isNaN(date.getTime())) return null;
+
+            const pad = (n) => n.toString().padStart(2, '0');
+            const year = date.getUTCFullYear();
+            const month = pad(date.getUTCMonth() + 1);
+            const day = pad(date.getUTCDate());
+            const hours = pad(date.getUTCHours());
+            const minutes = pad(date.getUTCMinutes());
+            const seconds = pad(date.getUTCSeconds());
+
+            return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        };
+
+        // CORREÇÃO: Lógica de datas prioritária
+        let createdAt;
+        if (saleData.created_at) {
+            createdAt = formatUTCDate(saleData.created_at);
+        } else if (saleData.timestamp) {
+            createdAt = formatUTCDate(saleData.timestamp);
+        } else {
+            // Buscar do banco se existir
+            const existingSale = await pool.query(
+                'SELECT created_at FROM sales WHERE sale_code = $1',
+                [saleData.sale_code]
+            );
+            if (existingSale.rows[0]?.created_at) {
+                createdAt = formatUTCDate(existingSale.rows[0].created_at);
+            } else {
+                createdAt = formatUTCDate(Date.now());
+            }
+        }
+
+        // Approved date apenas se paid
+        let approvedDate = null;
+        if (utmifyStatus === 'paid') {
+            if (saleData.approved_at) {
+                approvedDate = formatUTCDate(saleData.approved_at);
+            } else if (saleData.timestamp) {
+                approvedDate = formatUTCDate(saleData.timestamp);
+            } else {
+                approvedDate = createdAt; // Usa mesma data de criação
+            }
+        }
+
+        // Garantir valores em centavos
+        const priceInCents = Math.round(parseFloat(saleData.plan_value || 0) * 100);
 
         const payload = {
             orderId: saleData.sale_code,
@@ -382,11 +463,8 @@ async function sendToUtmify(saleData, clickData) {
             paymentMethod: saleData.payment_method || "pix",
             status: utmifyStatus,
 
-            createdAt: toUTMDate(saleData.created_at),
-            approvedDate:
-                saleData.status === "approved" && saleData.approved_at
-                    ? toUTMDate(saleData.approved_at)
-                    : null,
+            createdAt: createdAt,
+            approvedDate: approvedDate,
             refundedAt: null,
 
             customer: {
@@ -394,45 +472,53 @@ async function sendToUtmify(saleData, clickData) {
                 email: saleData.customer_email || "nao@apexvips.com",
                 phone: saleData.customer_phone || null,
                 document: saleData.customer_document || null,
-                ip: saleData.ip || clickData?.ip || "0.0.0.0",
-                country: "BR"
+                country: "BR",
+                ip: saleData.ip || clickData?.ip || "0.0.0.0"
             },
 
             products: [
                 {
-                    id: planId,
-                    name: saleData.plan_name,
-                    planId: planId,
-                    planName: saleData.plan_name,
+                    id: saleData.plan_name?.toLowerCase().replace(/[^a-z0-9]/g, '-') || "product",
+                    name: saleData.plan_name || "Produto",
+                    planId: null,
+                    planName: saleData.plan_name || null,
                     quantity: 1,
-                    priceInCents: Math.round(saleData.plan_value * 100)
+                    priceInCents: priceInCents
                 }
             ],
 
             trackingParameters: {
                 src: null,
                 sck: null,
-                utm_source: utmSource,
-                utm_campaign: utmCampaign,
-                utm_medium: utmMedium,
-                utm_content: utmContent,
-                utm_term: utmTerm
+                utm_source: clickData?.utm_source || saleData.utm_source || null,
+                utm_campaign: clickData?.utm_campaign || saleData.utm_campaign || null,
+                utm_medium: clickData?.utm_medium || saleData.utm_medium || null,
+                utm_content: clickData?.utm_content || saleData.utm_content || null,
+                utm_term: clickData?.utm_term || saleData.utm_term || null
             },
 
             commission: {
-                totalPriceInCents: Math.round(saleData.plan_value * 100),
+                totalPriceInCents: priceInCents,
                 gatewayFeeInCents: 0,
-                userCommissionInCents: Math.round(saleData.plan_value * 100),
+                userCommissionInCents: priceInCents,
                 currency: "BRL"
-            },
-
-            isTest
+            }
         };
+
+        if (isTest) {
+            payload.isTest = true;
+        }
 
         const response = await axios.post(
             "https://api.utmify.com.br/api-credentials/orders",
             payload,
-            { headers: { "x-api-token": UTMIFY_API_KEY }, timeout: 15000 }
+            {
+                headers: {
+                    "x-api-token": UTMIFY_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                timeout: 15000
+            }
         );
 
         await pool.query(
@@ -440,7 +526,8 @@ async function sendToUtmify(saleData, clickData) {
             [saleData.sale_code]
         );
 
-        return { success: true };
+        return { success: true, data: response.data };
+
     } catch (err) {
         console.error("❌ Erro UTMify:", err.response?.data || err.message);
         return { success: false, error: err.message };
@@ -450,106 +537,97 @@ async function sendToUtmify(saleData, clickData) {
 // --- FUNÇÕES DE PIXEL ---
 
 async function sendTikTokEvent(pixel, eventData, clickData, isTest = false) {
+    console.log(`🎯 ENVIANDO TIKTOK: ${eventData.sale_code}`);
+
     const url = 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
 
-    // 🔍 DEBUG DE ENTRADA
-    console.log("\n================= 📡 TIKTOK EVENT DEBUG =================");
-    console.log("🧩 Pixel Usado:", pixel.name, `(${pixel.platform})`);
-    console.log("🆔 Pixel ID:", pixel.pixel_id);
-    console.log("🔵 event_source_id:", pixel.event_source_id || pixel.pixel_id);
-    console.log("💵 Valor da compra:", eventData.plan_value);
-    console.log("👤 Email:", eventData.customer_email);
-    console.log("📱 Telefone:", eventData.customer_phone);
-    console.log("🧾 Documento:", eventData.customer_document);
-    console.log("🌐 Landing:", clickData?.landing_page);
-    console.log("↩️ Referrer:", clickData?.referrer);
-    console.log("📌 TTCLID recebido:", clickData?.ttclid || "❌ NÃO VEIO TTCLID!");
-    console.log("===========================================================\n");
+    // CORREÇÃO: TikTok web não usa event_source_id ou usa domain
+    const eventSourceId = ''; // Deixar vazio para web
+    // OU usar domain se disponível
+    // const landingDomain = clickData?.landing_page ? new URL(clickData.landing_page).hostname : '';
 
-    // Hash do usuário
+    // Hash dos dados do usuário
     const user = {};
-    if (eventData.customer_email) user.email = hashData(eventData.customer_email);
-    if (eventData.customer_phone) user.phone = hashData(eventData.customer_phone);
-    if (eventData.customer_document) user.external_id = hashData(eventData.customer_document);
+    if (eventData.customer_email) {
+        user.email = hashData(eventData.customer_email.toLowerCase().trim());
+    }
+    if (eventData.customer_phone) {
+        const phoneClean = eventData.customer_phone.replace(/\D/g, '');
+        user.phone = hashData(phoneClean);
+    }
+    if (eventData.customer_document) {
+        const docClean = eventData.customer_document.replace(/\D/g, '');
+        user.external_id = hashData(docClean);
+    }
 
     if (clickData?.ip) user.ip = clickData.ip;
     if (eventData.user_agent) user.user_agent = eventData.user_agent;
 
+    // CORREÇÃO: Valor com 2 casas decimais
+    const value = parseFloat(eventData.plan_value || 0);
+    const valueFixed = parseFloat(value.toFixed(2));
+
     const payload = {
         event_source: "web",
-        event_source_id: pixel.event_source_id || pixel.pixel_id,
+        event_source_id: eventSourceId, // CORREÇÃO: vazio para web
         data: [
             {
                 event: "Purchase",
                 event_time: Math.floor(Date.now() / 1000),
                 event_id: eventData.sale_code,
-                user,
+                user: user,
                 properties: {
                     currency: eventData.currency || "BRL",
-                    value: eventData.plan_value,
+                    value: valueFixed, // CORREÇÃO: 2 casas decimais
                     contents: [
                         {
                             content_id: "vip_access",
                             content_name: eventData.plan_name || "Acesso VIP",
                             quantity: 1,
-                            price: eventData.plan_value
+                            price: valueFixed // CORREÇÃO: 2 casas decimais
                         }
                     ],
-                    content_type: "product",
+                    content_type: "product"
                 },
                 page: {
-                    url: clickData?.landing_page || "https://tracking.com",
-                    referrer: clickData?.referrer || "",
-                },
-                context: clickData?.ttclid
-                    ? {
-                        ad: {
-                            callback: clickData.ttclid
-                        }
-                    }
-                    : undefined
+                    url: clickData?.landing_page || "https://apexvips.com",
+                    referrer: clickData?.referrer || ""
+                }
             }
         ]
     };
 
-    const cleanPayload = JSON.parse(JSON.stringify(payload));
-
-    if (isTest) {
-        cleanPayload.test_event_code = pixel.test_event_code || "TEST54815";
+    if (clickData?.ttclid) {
+        payload.data[0].context = {
+            ad: {
+                callback: clickData.ttclid
+            }
+        };
     }
 
-    // 📦 Mostrar payload final
-    console.log("📦 PAYLOAD FINAL ENVIADO AO TIKTOK:");
-    console.log(JSON.stringify(cleanPayload, null, 2));
+    if (isTest) {
+        payload.test_event_code = pixel.test_event_code || "TEST54815";
+    }
 
     try {
-        const response = await axios.post(url, cleanPayload, {
+        const response = await axios.post(url, payload, {
             headers: {
                 "Access-Token": pixel.access_token,
                 "Content-Type": "application/json"
-            }
+            },
+            timeout: 10000
         });
-
-        // 🟩 Resposta do TikTok
-        console.log("\n🟩 RESPOSTA DO TIKTOK:");
-        console.log(JSON.stringify(response.data, null, 2));
-        console.log("===========================================================\n");
 
         return { success: true, data: response.data };
 
     } catch (err) {
-        // ❌ ERRO DETALHADO
-        console.log("\n🔥🔥🔥 ERRO AO ENVIAR PARA O TIKTOK 🔥🔥🔥");
-        console.log("📌 STATUS:", err.response?.status);
-        console.log("📌 DATA:", JSON.stringify(err.response?.data, null, 2));
-        console.log("📌 MESSAGE:", err.message);
-        console.log("===========================================================\n");
-
+        console.error(`❌ Erro TikTok:`, err.response?.data || err.message);
         return { success: false, error: err.message };
     }
 }
 
 // Enviar evento para Facebook - CORRIGIDA
+// CORRIGIR a função sendFacebookEvent
 async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
     const url = `https://graph.facebook.com/v19.0/${pixel.pixel_id}/events`;
 
@@ -578,8 +656,10 @@ async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
         }
     });
 
-    // CORREÇÃO: Valor em centavos para Facebook
-    const valueInCents = eventData.plan_value * 100;
+    // 🔥🔥🔥 CORREÇÃO CRÍTICA: Facebook NÃO usa centavos!
+    // Valor deve ser em reais com 2 casas decimais
+    const value = parseFloat(eventData.plan_value || 0);
+    const valueInReais = parseFloat(value.toFixed(2)); // Formata para 2 casas decimais
 
     const payload = {
         data: [{
@@ -589,7 +669,7 @@ async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
             action_source: 'website',
             user_data: userData,
             custom_data: {
-                value: valueInCents, // CORREÇÃO: Valor em centavos
+                value: valueInReais, // 🔥 CORREÇÃO: Valor em REAIS, não centavos
                 currency: eventData.currency || 'BRL'
             }
         }],
@@ -601,12 +681,18 @@ async function sendFacebookEvent(pixel, eventData, clickData, isTest = false) {
         payload.test_event_code = pixel.test_event_code || 'TEST54815';
     }
 
+    // Log para debug
+    console.log(`📘 Facebook Event: ${eventData.sale_code}`);
+    console.log(`💰 Valor: R$ ${valueInReais.toFixed(2)} (NÃO em centavos!)`);
+    console.log(`👤 Dados usuário:`, Object.keys(userData).length > 0 ? 'Sim' : 'Não');
+
     try {
         const response = await axios.post(url, payload);
-        console.log(`✅ Facebook: Evento enviado para ${eventData.sale_code}`);
+        console.log(`✅ Facebook: Evento enviado para ${eventData.sale_code} - Valor: R$ ${valueInReais}`);
         return { success: true, data: response.data };
     } catch (error) {
         console.error('❌ Facebook Error:', error.response?.data || error.message);
+        console.error('📦 Payload enviado:', JSON.stringify(payload, null, 2));
         return { success: false, error: error.message };
     }
 }
@@ -652,6 +738,85 @@ async function processPixelEvents(saleData, clickData, isTest = false) {
 }
 
 // --- ROTAS ---
+
+// Rota para diagnóstico completo
+app.get('/api/diagnose/:sale_code', async (req, res) => {
+    try {
+        const saleCode = req.params.sale_code;
+
+        console.log(`🔍 DIAGNÓSTICO para: ${saleCode}`);
+
+        // 1. Buscar venda
+        const saleResult = await pool.query(
+            'SELECT * FROM sales WHERE sale_code = $1 LIMIT 1',
+            [saleCode]
+        );
+
+        if (saleResult.rows.length === 0) {
+            return res.json({ error: 'Venda não encontrada' });
+        }
+
+        const sale = saleResult.rows[0];
+
+        // 2. Buscar click associado
+        const clickResult = await pool.query(
+            'SELECT * FROM clicks WHERE click_id = $1 LIMIT 1',
+            [sale.click_id || sale.sale_code]
+        );
+
+        const click = clickResult.rows[0] || null;
+
+        // 3. Buscar pixels ativos
+        const pixels = await getActivePixels();
+
+        // 4. Simular envio UTMify
+        const utmifyResult = await sendToUtmify(sale, click);
+
+        // 5. Simular envio TikTok
+        const tiktokPixel = pixels.find(p => p.platform === 'tiktok');
+        let tiktokResult = null;
+        if (tiktokPixel) {
+            tiktokResult = await sendTikTokEvent(tiktokPixel, sale, click, true);
+        }
+
+        res.json({
+            success: true,
+            sale: {
+                ...sale,
+                has_utm: !!(sale.utm_source || sale.utm_campaign),
+                has_click_id: !!sale.click_id
+            },
+            click: click ? {
+                click_id: click.click_id,
+                ttclid: click.ttclid || '❌ NÃO ENCONTRADO',
+                fbclid: click.fbclid || '❌ NÃO ENCONTRADO',
+                utm_source: click.utm_source,
+                utm_campaign: click.utm_campaign,
+                landing_page: click.landing_page,
+                received_at: click.received_at
+            } : null,
+            pixels: pixels.map(p => ({
+                platform: p.platform,
+                name: p.name,
+                pixel_id: p.pixel_id,
+                has_access_token: !!p.access_token
+            })),
+            tests: {
+                utmify: utmifyResult,
+                tiktok: tiktokResult
+            },
+            recommendations: [
+                !click ? "❌ Nenhum click associado - o ttclid não será enviado" : "",
+                click && !click.ttclid ? "⚠️ Click não tem ttclid - TikTok não conseguirá atribuir" : "",
+                !tiktokPixel ? "❌ Nenhum pixel TikTok configurado" : ""
+            ].filter(r => r)
+        });
+
+    } catch (error) {
+        console.error('❌ Erro no diagnóstico:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // Rota 0: Validação GET para Apex Vips
 app.get('/api/webhook/apex', (req, res) => {
@@ -1155,6 +1320,11 @@ async function checkUtmForSale(saleCode, clickId) {
 // =======================
 
 async function processApexEvent(eventData) {
+    console.log("\n" + "=".repeat(50));
+    console.log("💰 PROCESSANDO EVENTO APEX:", eventData.event);
+    console.log("📦 Dados recebidos:", JSON.stringify(eventData, null, 2));
+    console.log("=".repeat(50) + "\n");
+
     try {
         console.log("\n💰 PROCESSANDO EVENTO APEX:", eventData.event);
 
@@ -1222,6 +1392,17 @@ async function processApexEvent(eventData) {
 
         // 5️⃣ Recuperar UTM real
         const clickData = await recoverUTM(baseSaleData);
+        console.log("\n🔍 RESULTADO recoverUTM:");
+        console.log("Click encontrado?", !!clickData);
+        if (clickData) {
+            console.log("- Click ID:", clickData.click_id);
+            console.log("- TTCLID:", clickData.ttclid || "❌ AUSENTE");
+            console.log("- UTMs:", {
+                source: clickData.utm_source,
+                campaign: clickData.utm_campaign,
+                medium: clickData.utm_medium
+            });
+        }
 
         // ====================================================
         // 🔥 FALLBACK AUTOMÁTICO PARA MAILING / INTERNO
@@ -1266,7 +1447,7 @@ async function processApexEvent(eventData) {
         console.log("✅ EVENTO APEX PROCESSADO COM SUCESSO!");
 
     } catch (err) {
-        console.error("❌ ERRO AO PROCESSAR EVENTO APEX:", err);
+        console.error("❌ ERRO DETALHADO:", err);
     }
 }
 
@@ -1277,25 +1458,17 @@ async function findClickByMultipleCriteria(clickId) {
     console.log(`🔍 Busca avançada por click: "${clickId}"`);
 
     try {
-        // Tentar diferentes formas de busca
         const queries = [
-            // 1. Busca exata por click_id
-            { query: 'SELECT * FROM clicks WHERE click_id = $1', params: [clickId] },
-
-            // 2. Busca por utm_id
-            { query: 'SELECT * FROM clicks WHERE utm_id = $1', params: [clickId] },
-
-            // 3. Busca por parte do click_id (para casos como "clk_1765079740645_ohfgh0")
-            { query: 'SELECT * FROM clicks WHERE click_id LIKE $1', params: [`%${clickId}%`] },
-
-            // 4. Busca por utm_content (pode conter click_id)
-            { query: 'SELECT * FROM clicks WHERE utm_content LIKE $1', params: [`%${clickId}%`] },
-
-            // 5. Busca por sale_code em vendas (se já houver venda associada)
+            // Todas com LIMIT 1
+            { query: 'SELECT * FROM clicks WHERE click_id = $1 LIMIT 1', params: [clickId] },
+            { query: 'SELECT * FROM clicks WHERE utm_id = $1 LIMIT 1', params: [clickId] },
+            { query: 'SELECT * FROM clicks WHERE click_id LIKE $1 LIMIT 1', params: [`%${clickId}%`] },
+            { query: 'SELECT * FROM clicks WHERE utm_content LIKE $1 LIMIT 1', params: [`%${clickId}%`] },
             {
                 query: `SELECT c.* FROM clicks c 
                      JOIN sales s ON c.click_id = s.click_id 
-                     WHERE s.sale_code = $1`, params: [clickId]
+                     WHERE s.sale_code = $1 LIMIT 1`,
+                params: [clickId]
             }
         ];
 
@@ -1315,25 +1488,100 @@ async function findClickByMultipleCriteria(clickId) {
     }
 }
 
-// Rota 5: Redirecionamento com tracking
+function normalizePlanValue(value, source = 'apex') {
+    if (!value && value !== 0) return 0;
+
+    let numValue;
+    if (typeof value === 'string') {
+        numValue = parseFloat(value.replace(',', '.'));
+    } else {
+        numValue = parseFloat(value);
+    }
+
+    if (isNaN(numValue)) return 0;
+
+    // CORREÇÃO: Apex Vips envia em centavos (ex: 4990 = R$49,90)
+    if (source === 'apex' && numValue > 10000) {
+        return numValue / 100; // Converte para reais
+    }
+
+    return numValue;
+}
+
+// Usar no processApexEvent:
+const baseSaleData = {
+    // ... outros campos
+    plan_value: normalizePlanValue(
+        eventData.transaction?.plan_value,
+        'apex'
+    ) || existing.rows[0]?.plan_value || 0,
+    // ...
+};
+
+app.post('/admin/cleanup-test-data', async (req, res) => {
+    try {
+        // Remover vendas de teste
+        const deleteTestSales = await pool.query(
+            "DELETE FROM sales WHERE sale_code LIKE 'TEST_%' OR sale_code LIKE 'APEX_%'"
+        );
+
+        // Remover clicks de teste
+        const deleteTestClicks = await pool.query(
+            "DELETE FROM clicks WHERE click_id LIKE 'test_%' OR click_id LIKE 'tg_%' OR click_id LIKE 'pixel_%'"
+        );
+
+        res.json({
+            success: true,
+            message: 'Dados de teste removidos',
+            deleted: {
+                sales: deleteTestSales.rowCount,
+                clicks: deleteTestClicks.rowCount
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Erro na limpeza:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Atualizar a rota /redirect
 app.get('/redirect', async (req, res) => {
     try {
         const { click_id, url, ...params } = req.query;
 
-        // URL de destino (Telegram por padrão)
+        // CORREÇÃO: Normalizar click_id do Telegram + limite de caracteres
+        let normalizedClickId = click_id;
+        if (click_id) {
+            // Remove caracteres especiais que o Telegram pode cortar
+            normalizedClickId = click_id.replace(/[^a-zA-Z0-9_\-]/g, '');
+
+            // 🔥 CORREÇÃO: Limitar a 64 caracteres (limite seguro para DB)
+            if (normalizedClickId.length > 64) {
+                normalizedClickId = normalizedClickId.slice(0, 64);
+                console.log(`⚠️ Click_id truncado para 64 caracteres: ${normalizedClickId}`);
+            }
+
+            // Se ficou vazio, gera um novo
+            if (!normalizedClickId || normalizedClickId.length < 3) {
+                normalizedClickId = `tg_${Date.now()}`;
+                if (normalizedClickId.length > 64) {
+                    normalizedClickId = normalizedClickId.slice(0, 64);
+                }
+            }
+        }
+
         let destination = url || TELEGRAM_BOT_URL;
 
-        // Se for Telegram, adicionar click_id como parâmetro start
-        if ((destination.includes('t.me') || destination.includes('telegram.me')) && click_id) {
+        if ((destination.includes('t.me') || destination.includes('telegram.me')) && normalizedClickId) {
             const urlObj = new URL(destination);
-            urlObj.searchParams.set('start', click_id);
+            urlObj.searchParams.set('start', normalizedClickId);
             destination = urlObj.toString();
         }
 
-        // Registrar o clique
-        if (click_id) {
+        if (normalizedClickId) {
             const clickData = {
-                click_id,
+                click_id: normalizedClickId,
                 timestamp_ms: Date.now(),
                 ip: req.ip || req.headers['x-forwarded-for'],
                 user_agent: req.headers['user-agent'],
@@ -1348,7 +1596,6 @@ app.get('/redirect', async (req, res) => {
             saveClick(clickData).catch(console.error);
         }
 
-        // Redirecionar imediatamente
         res.redirect(302, destination);
 
     } catch (error) {
@@ -1358,45 +1605,83 @@ app.get('/redirect', async (req, res) => {
 });
 
 async function recoverUTM(sale) {
-    let res;
+    console.log(`🔍 RECOVER UTM para: ${sale.sale_code} / ${sale.click_id}`);
 
-    // 0. O sale_code é o principal click_id real
-    res = await pool.query(
-        "SELECT * FROM clicks WHERE click_id = $1 LIMIT 1",
-        [sale.sale_code]
-    );
-    if (res.rows.length > 0) return res.rows[0];
+    // 1. Buscar por fbc/fbp (Facebook dedupe) - NOVA PRIORIDADE
+    if (sale.fbc || sale.fbp) {
+        const resFB = await pool.query(
+            `SELECT * FROM clicks 
+             WHERE (fbc = $1 OR fbp = $2)
+             AND (fbc IS NOT NULL OR fbp IS NOT NULL)
+             ORDER BY received_at DESC 
+             LIMIT 1`,
+            [sale.fbc || '', sale.fbp || '']
+        );
+        if (resFB.rows.length > 0) {
+            console.log(`✅ Click encontrado por fbc/fbp (Facebook dedupe)`);
+            return resFB.rows[0];
+        }
+    }
 
-    // 1. Se a venda tiver click_id, tentar
+    // 2. Buscar por ttclid primeiro (mais preciso para TikTok)
     if (sale.click_id) {
-        res = await pool.query(
+        const resTTCLID = await pool.query(
+            `SELECT * FROM clicks 
+             WHERE click_id = $1 
+             AND ttclid IS NOT NULL 
+             AND ttclid != ''
+             LIMIT 1`,
+            [sale.click_id]
+        );
+        if (resTTCLID.rows.length > 0) {
+            console.log(`✅ Click encontrado por click_id com ttclid: ${sale.click_id}`);
+            return resTTCLID.rows[0];
+        }
+    }
+
+    // 3. Tentar com click_id exato
+    if (sale.click_id) {
+        const res1 = await pool.query(
             "SELECT * FROM clicks WHERE click_id = $1 LIMIT 1",
             [sale.click_id]
         );
-        if (res.rows.length > 0) return res.rows[0];
+        if (res1.rows.length > 0) {
+            console.log(`✅ Click encontrado por click_id: ${sale.click_id}`);
+            return res1.rows[0];
+        }
     }
 
-    // 2. MATCH parcial no click_id
-    res = await pool.query(
-        "SELECT * FROM clicks WHERE click_id LIKE $1 LIMIT 1",
-        [`%${sale.sale_code}%`]
-    );
-    if (res.rows.length > 0) return res.rows[0];
-
-    // 3. MATCH via utm_id
-    res = await pool.query(
-        "SELECT * FROM clicks WHERE utm_id = $1 LIMIT 1",
+    // 4. Tentar com sale_code
+    const res2 = await pool.query(
+        "SELECT * FROM clicks WHERE click_id = $1 LIMIT 1",
         [sale.sale_code]
     );
-    if (res.rows.length > 0) return res.rows[0];
+    if (res2.rows.length > 0) {
+        console.log(`✅ Click encontrado por sale_code: ${sale.sale_code}`);
+        return res2.rows[0];
+    }
 
-    // 4. MATCH via utm_content
-    res = await pool.query(
-        "SELECT * FROM clicks WHERE utm_content LIKE $1 LIMIT 1",
-        [`%${sale.sale_code}%`]
-    );
-    if (res.rows.length > 0) return res.rows[0];
+    // 5. Buscar cliques recentes do mesmo IP (última hora) com prioridade para ttclid
+    if (sale.ip && sale.ip !== '0.0.0.0') {
+        const res3 = await pool.query(
+            `SELECT * FROM clicks 
+             WHERE ip = $1 
+             AND received_at >= NOW() - INTERVAL '1 hour'
+             ORDER BY 
+                 CASE WHEN ttclid IS NOT NULL AND ttclid != '' THEN 1 
+                      WHEN fbc IS NOT NULL OR fbp IS NOT NULL THEN 2
+                      ELSE 3 END,
+                 received_at DESC 
+             LIMIT 1`,
+            [sale.ip]
+        );
+        if (res3.rows.length > 0) {
+            console.log(`✅ Click encontrado por IP recente: ${sale.ip}`);
+            return res3.rows[0];
+        }
+    }
 
+    console.log(`❌ Nenhum click encontrado para ${sale.sale_code}`);
     return null;
 }
 
@@ -1409,6 +1694,71 @@ app.get('/admin/pixels', async (req, res) => {
         res.json(pixels);
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+// Adicionar esta nova rota de teste específica para Facebook
+app.post('/api/test/facebook-value', async (req, res) => {
+    try {
+        const { pixel_id, customer_email, plan_value = 97.00 } = req.body;
+
+        console.log('🧪 Teste específico para Facebook (valor em reais)');
+
+        // Buscar pixel Facebook
+        const pixels = await pool.query(
+            'SELECT * FROM pixels WHERE platform = $1 AND is_active = TRUE',
+            ['facebook']
+        );
+
+        if (!pixels.rows || pixels.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Nenhum pixel Facebook ativo encontrado'
+            });
+        }
+
+        const pixel = pixels.rows[0];
+
+        const testData = {
+            sale_code: `FB_TEST_${Date.now()}`,
+            customer_email: customer_email || 'test@example.com',
+            customer_phone: '11999999999',
+            customer_document: '12345678900',
+            customer_name: 'Cliente Teste Facebook',
+            plan_name: 'Acesso VIP Teste',
+            plan_value: plan_value,
+            currency: 'BRL',
+            ip: '189.45.210.130',
+            user_agent: 'Test-Facebook/1.0'
+        };
+
+        const clickData = {
+            fbc: 'fb.1.1234567890.ABCDEF',
+            fbp: 'fb.1.1234567890.ABCDEF',
+            landing_page: 'https://teste.tracking.com'
+        };
+
+        const result = await sendFacebookEvent(pixel, testData, clickData, true);
+
+        res.json({
+            success: result.success,
+            message: 'Teste Facebook executado',
+            test_data: {
+                ...testData,
+                plan_value_formatted: `R$ ${parseFloat(testData.plan_value).toFixed(2)}`
+            },
+            result: {
+                valor_enviado: parseFloat(testData.plan_value).toFixed(2),
+                valor_em_centavos: (testData.plan_value * 100),
+                observacao: 'Facebook deve receber valor EM REAIS, não centavos!',
+                facebook_response: result.data,
+                error: result.error
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Erro no teste Facebook:', error.message);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -1539,6 +1889,17 @@ app.put('/admin/pixels/:id', async (req, res) => {
             return res.status(404).json({ error: 'Pixel não encontrado' });
         }
 
+        const currentPixel = checkResult.rows[0];
+
+        // CORREÇÃO: Não permitir trocar plataforma
+        if (platform !== undefined && platform !== currentPixel.platform) {
+            return res.status(400).json({
+                error: 'Não é permitido alterar a plataforma do pixel',
+                current_platform: currentPixel.platform,
+                requested_platform: platform
+            });
+        }
+
         // Construir query dinâmica
         const updates = [];
         const values = [];
@@ -1550,12 +1911,7 @@ app.put('/admin/pixels/:id', async (req, res) => {
             paramCount++;
         }
 
-        if (platform !== undefined) {
-            updates.push(`platform = $${paramCount}`);
-            values.push(platform);
-            paramCount++;
-        }
-
+        // platform não é mais atualizável aqui
         if (pixel_id !== undefined) {
             updates.push(`pixel_id = $${paramCount}`);
             values.push(pixel_id);
@@ -1586,14 +1942,13 @@ app.put('/admin/pixels/:id', async (req, res) => {
             paramCount++;
         }
 
-        // Sempre atualizar updated_at
-        updates.push(`updated_at = CURRENT_TIMESTAMP`);
-
-        if (updates.length === 1) { // apenas updated_at
+        if (updates.length === 0) {
             return res.status(400).json({ error: 'Nenhum campo para atualizar' });
         }
 
+        updates.push(`updated_at = CURRENT_TIMESTAMP`);
         values.push(pixelId);
+
         const query = `
             UPDATE pixels 
             SET ${updates.join(', ')}
@@ -1602,9 +1957,6 @@ app.put('/admin/pixels/:id', async (req, res) => {
         `;
 
         const result = await pool.query(query, values);
-
-        console.log(`✏️ Pixel atualizado: ${result.rows[0].name}`);
-
         res.json({
             success: true,
             message: 'Pixel atualizado com sucesso',
@@ -1823,11 +2175,11 @@ app.get('/admin/stats', async (req, res) => {
                 LIMIT 10
             `),
 
-            // Top campanhas por conversão (CORRIGIDA)
+            // Top campanhas por conversão (CORREÇÃO COMPLETA)
             pool.query(`
                 SELECT 
-                    s.utm_source,
-                    s.utm_campaign,
+                    COALESCE(c.utm_source, s.utm_source) as utm_source,
+                    COALESCE(c.utm_campaign, s.utm_campaign) as utm_campaign,
                     COUNT(DISTINCT s.sale_code) as sales_count,
                     SUM(s.plan_value) as total_revenue,
                     COUNT(DISTINCT c.click_id) as clicks_count,
@@ -1837,10 +2189,17 @@ app.get('/admin/stats', async (req, res) => {
                         ELSE 0
                     END as conversion_rate
                 FROM sales s
-                LEFT JOIN clicks c ON s.click_id = c.click_id
-                WHERE s.utm_source IS NOT NULL 
+                LEFT JOIN clicks c ON (
+                    s.click_id = c.click_id 
+                    OR s.sale_code = c.click_id
+                    OR (c.utm_id IS NOT NULL AND c.utm_id = s.sale_code)
+                )
+                WHERE (c.utm_source IS NOT NULL OR s.utm_source IS NOT NULL)
                     AND s.created_at >= CURRENT_DATE - INTERVAL '30 days'
-                GROUP BY s.utm_source, s.utm_campaign
+                    AND s.status = 'approved'
+                GROUP BY 
+                    COALESCE(c.utm_source, s.utm_source),
+                    COALESCE(c.utm_campaign, s.utm_campaign)
                 HAVING COUNT(DISTINCT s.sale_code) > 0
                 ORDER BY total_revenue DESC
                 LIMIT 10
@@ -1933,17 +2292,29 @@ app.get('/admin/stats', async (req, res) => {
                 sales_count: parseInt(row.sales_count),
                 total_revenue: parseFloat(row.total_revenue).toFixed(2),
                 clicks_count: parseInt(row.clicks_count),
-                conversion_rate: parseFloat(row.conversion_rate)
+                conversion_rate: parseFloat(row.conversion_rate),
+                // Adicionar insights
+                cpa: row.clicks_count > 0 ? (parseFloat(row.total_revenue) / parseInt(row.clicks_count)).toFixed(2) : 'N/A',
+                roas: row.clicks_count > 0 ? (parseFloat(row.total_revenue) / (parseInt(row.clicks_count) * 0.5)).toFixed(2) : 'N/A' // Assumindo CPC de R$0,50
             })),
 
             // Timestamp
             generated_at: new Date().toISOString(),
-            period: 'last_30_days'
+            period: 'last_30_days',
+            // Adicionar metadados
+            metadata: {
+                timezone: 'UTC',
+                currency: 'BRL',
+                funnel_window: '30_days'
+            }
         });
 
     } catch (error) {
         console.error('❌ Erro ao buscar estatísticas:', error.message);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({
+            error: error.message,
+            details: 'Verifique a conexão com o banco de dados'
+        });
     }
 });
 
