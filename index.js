@@ -169,6 +169,17 @@ async function setupDatabase() {
     }
 }
 
+function brTimestampToUTC(timestampSeconds) {
+    const ms = timestampSeconds * 1000;
+    const utcDate = new Date(ms + 3 * 60 * 60 * 1000); // BR → UTC
+    return utcDate;
+}
+
+// Formato exigido pela UTMify
+function toUTMDate(d) {
+    return new Date(d).toISOString().replace("T", " ").substring(0, 19);
+}
+
 // --- FUNÇÕES AUXILIARES ---
 function hashData(data) {
     if (!data || typeof data !== 'string') return null;
@@ -345,125 +356,94 @@ async function sendToUtmify(saleData, clickData) {
     }
 
     try {
-        const now = new Date();
-        const isTest = saleData.sale_code.includes('TEST') || false;
+        const isTest = saleData.sale_code.includes('TEST');
 
-        // Status correto para UTMify
-        let utmifyStatus = 'waiting_payment';
-        if (saleData.status === 'approved' || saleData.status === 'paid') {
-            utmifyStatus = 'paid';
-        }
+        const utmifyStatus =
+            saleData.status === 'approved' || saleData.status === 'paid'
+                ? 'paid'
+                : 'waiting_payment';
 
-        // Gerar planId baseado no plan_name
         const planId = saleData.plan_name
             ? saleData.plan_name.toLowerCase()
                 .replace(/[^a-z0-9]/g, '-')
                 .replace(/-+/g, '-')
                 .replace(/^-|-$/g, '')
-                .substring(0, 50)
-            : 'apex-access';
+            : "plan";
 
-        // Determinar UTM parameters
-        const utmSource = saleData.utm_source || clickData?.utm_source || 'direct';
-        const utmMedium = saleData.utm_medium || clickData?.utm_medium || 'organic';
-        const utmCampaign = saleData.utm_campaign || clickData?.utm_campaign || 'default';
-        const utmContent = saleData.utm_content || clickData?.utm_content || '';
-        const utmTerm = saleData.utm_term || clickData?.utm_term || '';
-
-        console.log('📊 DETALHES DO ENVIO UTMIFY:');
-        console.log('- Venda:', saleData.sale_code);
-        console.log('- Cliente:', saleData.customer_name);
-        console.log('- Valor:', saleData.plan_value);
-        console.log('- Status UTMify:', utmifyStatus);
-        console.log('- É teste?', isTest);
-        console.log('- UTMs:', { utmSource, utmMedium, utmCampaign, utmContent, utmTerm });
-
-        // Formatador obrigatório da UTMify
-        const formatDate = (d) =>
-            new Date(d).toISOString().replace("T", " ").substring(0, 19);
+        const utmSource = saleData.utm_source || clickData?.utm_source || null;
+        const utmMedium = saleData.utm_medium || clickData?.utm_medium || null;
+        const utmCampaign = saleData.utm_campaign || clickData?.utm_campaign || null;
+        const utmContent = saleData.utm_content || clickData?.utm_content || null;
+        const utmTerm = saleData.utm_term || clickData?.utm_term || null;
 
         const payload = {
             orderId: saleData.sale_code,
-            platform: saleData.payment_platform || 'ApexVips',
-            paymentMethod: saleData.payment_method || 'unknown',
+            platform: saleData.payment_platform || "ApexVips",
+            paymentMethod: saleData.payment_method || "pix",
             status: utmifyStatus,
 
-            // DATAS CORRETAS
-            createdAt: saleData.createdAt
-                ? saleData.createdAt
-                : (saleData.created_at ? formatDate(saleData.created_at) : formatDate(now)),
-
+            createdAt: toUTMDate(saleData.created_at),
             approvedDate:
                 saleData.status === "approved" && saleData.approved_at
-                    ? formatDate(saleData.approved_at)
+                    ? toUTMDate(saleData.approved_at)
                     : null,
+            refundedAt: null,
 
             customer: {
-                name: saleData.customer_name || 'Cliente',
-                email: saleData.customer_email || "naoinformado@utmify.com",
-                phone: saleData.customer_phone ? saleData.customer_phone.replace(/\D/g, '') : null,
-                document: saleData.customer_document ? saleData.customer_document.replace(/\D/g, '') : null,
-                ip: saleData.ip || clickData?.ip || '0.0.0.0'
+                name: saleData.customer_name || "Cliente",
+                email: saleData.customer_email || "nao@apexvips.com",
+                phone: saleData.customer_phone || null,
+                document: saleData.customer_document || null,
+                ip: saleData.ip || clickData?.ip || "0.0.0.0",
+                country: "BR"
             },
 
-            products: [{
-                id: planId,
-                planId: planId,
-                name: saleData.plan_name || 'Acesso VIP',
-                planName: saleData.plan_name || 'Acesso VIP',
-                quantity: 1,
-                priceInCents: Math.round((saleData.plan_value || 0) * 100)
-            }],
+            products: [
+                {
+                    id: planId,
+                    name: saleData.plan_name,
+                    planId: planId,
+                    planName: saleData.plan_name,
+                    quantity: 1,
+                    priceInCents: Math.round(saleData.plan_value * 100)
+                }
+            ],
 
             trackingParameters: {
+                src: null,
+                sck: null,
                 utm_source: utmSource,
-                utm_medium: utmMedium,
                 utm_campaign: utmCampaign,
+                utm_medium: utmMedium,
                 utm_content: utmContent,
                 utm_term: utmTerm
             },
 
             commission: {
-                totalPriceInCents: Math.round((saleData.plan_value || 0) * 100),
+                totalPriceInCents: Math.round(saleData.plan_value * 100),
                 gatewayFeeInCents: 0,
-                userCommissionInCents: Math.round((saleData.plan_value || 0) * 100),
-                currency: saleData.currency || 'BRL'
+                userCommissionInCents: Math.round(saleData.plan_value * 100),
+                currency: "BRL"
             },
 
-            isTest: isTest
+            isTest
         };
 
-        console.log('📤 Enviando para UTMify:', JSON.stringify(payload, null, 2));
-
         const response = await axios.post(
-            'https://api.utmify.com.br/api-credentials/orders',
+            "https://api.utmify.com.br/api-credentials/orders",
             payload,
-            {
-                headers: {
-                    'x-api-token': UTMIFY_API_KEY,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 10000
-            }
+            { headers: { "x-api-token": UTMIFY_API_KEY }, timeout: 15000 }
         );
 
-        console.log(`✅ UTMify Response (${response.status}):`, response.data);
-
-        // Atualizar banco
         await pool.query(
-            'UPDATE sales SET utmify_sent = TRUE WHERE sale_code = $1',
+            "UPDATE sales SET utmify_sent = TRUE WHERE sale_code = $1",
             [saleData.sale_code]
         );
 
-        return { success: true, data: response.data };
-
-    } catch (error) {
-        console.error('❌ Erro ao enviar para UTMify:', {
-            status: error.response?.status,
-            data: error.response?.data,
-            message: error.message
-        });
-        return { success: false, error: error.message };
+        return { success: true };
+    } catch (err) {
+        console.error("❌ Erro UTMify:", err.response?.data || err.message);
+        return { success: false, error: err.message };
     }
 }
 
@@ -1410,18 +1390,17 @@ app.get('/redirect', async (req, res) => {
     }
 });
 
-// Recuperar UTM de vendas antigas baseado no sale_code e padrões reais do seu banco
 async function recoverUTM(sale) {
     let res;
 
-    // 0. Sempre tratar sale_code como possível click_id real
+    // 0. O sale_code é o principal click_id real
     res = await pool.query(
         "SELECT * FROM clicks WHERE click_id = $1 LIMIT 1",
         [sale.sale_code]
     );
     if (res.rows.length > 0) return res.rows[0];
 
-    // 1. Se a venda tiver click_id salvo, tente usar
+    // 1. Se a venda tiver click_id, tentar
     if (sale.click_id) {
         res = await pool.query(
             "SELECT * FROM clicks WHERE click_id = $1 LIMIT 1",
@@ -1430,35 +1409,26 @@ async function recoverUTM(sale) {
         if (res.rows.length > 0) return res.rows[0];
     }
 
-    // 2. Buscar click parcialmente igual ao sale_code
+    // 2. MATCH parcial no click_id
     res = await pool.query(
         "SELECT * FROM clicks WHERE click_id LIKE $1 LIMIT 1",
         [`%${sale.sale_code}%`]
     );
     if (res.rows.length > 0) return res.rows[0];
 
-    // 3. Buscar por utm_id
+    // 3. MATCH via utm_id
     res = await pool.query(
         "SELECT * FROM clicks WHERE utm_id = $1 LIMIT 1",
         [sale.sale_code]
     );
     if (res.rows.length > 0) return res.rows[0];
 
-    // 4. Buscar por utm_content (alguns setups salvam id ali)
+    // 4. MATCH via utm_content
     res = await pool.query(
         "SELECT * FROM clicks WHERE utm_content LIKE $1 LIMIT 1",
         [`%${sale.sale_code}%`]
     );
     if (res.rows.length > 0) return res.rows[0];
-
-    // 5. (Opcional) Buscar clique por IP do usuário
-    if (sale.ip) {
-        res = await pool.query(
-            "SELECT * FROM clicks WHERE ip = $1 ORDER BY received_at DESC LIMIT 1",
-            [sale.ip]
-        );
-        if (res.rows.length > 0) return res.rows[0];
-    }
 
     return null;
 }
@@ -1475,121 +1445,71 @@ app.get('/admin/pixels', async (req, res) => {
     }
 });
 
-// Reenviar todas as vendas para UTMify (reprocessamento em massa)
 app.post('/admin/resend-utmify', async (req, res) => {
     try {
         const { only_missing = false, limit = null } = req.body || {};
 
-        if (!UTMIFY_API_KEY) {
-            return res.status(400).json({
-                success: false,
-                error: 'UTMIFY_API_KEY não configurada.'
-            });
-        }
-
-        let query = 'SELECT * FROM sales';
-        if (only_missing) query += ' WHERE utmify_sent = FALSE';
-        query += ' ORDER BY created_at ASC';
+        let query = "SELECT * FROM sales";
+        if (only_missing) query += " WHERE utmify_sent = FALSE";
+        query += " ORDER BY created_at ASC";
         if (limit && Number.isInteger(limit)) query += ` LIMIT ${limit}`;
 
         const result = await pool.query(query);
         const sales = result.rows;
 
-        console.log(`\n🔄 Reenviando ${sales.length} vendas para a UTMify...`);
-
-        const summary = {
-            total: sales.length,
-            success: 0,
-            failed: 0,
-            details: []
-        };
-
-        const formatDate = (date) =>
-            new Date(date).toISOString().replace("T", " ").substring(0, 19);
+        const summary = { total: sales.length, success: 0, failed: 0, details: [] };
 
         for (const sale of sales) {
             try {
-                // Recuperação avançada de UTMs
-                let clickData = await recoverUTM(sale);
-
-                // Se não tem click_id na venda, usar o sale_code como click_id real
-                const click_id = sale.click_id ? sale.click_id : sale.sale_code;
-
-                // Status para UTMify
-                const utmifyStatus =
-                    sale.status === "approved" ? "paid" : "waiting_payment";
+                const clickData = await recoverUTM(sale);
 
                 const saleData = {
                     sale_code: sale.sale_code,
-                    click_id: click_id,
-
+                    click_id: sale.click_id || sale.sale_code,
                     customer_name: sale.customer_name,
                     customer_email: sale.customer_email,
                     customer_phone: sale.customer_phone,
                     customer_document: sale.customer_document,
-
                     plan_name: sale.plan_name,
-                    plan_value: parseFloat(sale.plan_value),
+                    plan_value: sale.plan_value,
                     currency: sale.currency,
                     payment_platform: sale.payment_platform,
                     payment_method: sale.payment_method,
+                    ip: sale.ip,
+                    user_agent: sale.user_agent,
 
-                    ip: sale.ip || clickData?.ip || "0.0.0.0",
-                    user_agent: sale.user_agent || "Reprocess/1.0",
+                    utm_source: clickData?.utm_source,
+                    utm_medium: clickData?.utm_medium,
+                    utm_campaign: clickData?.utm_campaign,
+                    utm_content: clickData?.utm_content,
+                    utm_term: clickData?.utm_term,
 
-                    // UTMs recuperadas corretamente
-                    utm_source: clickData?.utm_source || sale.utm_source || null,
-                    utm_medium: clickData?.utm_medium || sale.utm_medium || null,
-                    utm_campaign: clickData?.utm_campaign || sale.utm_campaign || null,
-                    utm_content: clickData?.utm_content || sale.utm_content || "",
-                    utm_term: clickData?.utm_term || sale.utm_term || "",
-
-                    status: utmifyStatus,
-
-                    createdAt: sale.created_at
-                        ? formatDate(sale.created_at)
-                        : formatDate(new Date()),
-
-                    approvedDate:
-                        sale.status === "approved"
-                            ? formatDate(sale.approved_at)
-                            : null
+                    status: sale.status,
+                    created_at: sale.created_at,
+                    approved_at: sale.approved_at
                 };
 
-                const response = await sendToUtmify(saleData, clickData);
+                const utmRes = await sendToUtmify(saleData, clickData);
+
+                await processPixelEvents(saleData, clickData, false);
 
                 summary.details.push({
                     sale_code: sale.sale_code,
-                    status: sale.status,
-                    utmify_status: response.success ? "success" : "failed",
-                    error: response.error || null
+                    utmify: utmRes.success,
                 });
 
-                if (response.success) summary.success++;
+                if (utmRes.success) summary.success++;
                 else summary.failed++;
 
-            } catch (innerError) {
+            } catch (err) {
                 summary.failed++;
-                summary.details.push({
-                    sale_code: sale.sale_code,
-                    status: sale.status,
-                    utmify_status: "failed",
-                    error: innerError.message
-                });
             }
         }
 
-        res.json({
-            success: true,
-            message: "Reprocessamento finalizado",
-            report: summary
-        });
+        res.json({ success: true, summary });
 
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
