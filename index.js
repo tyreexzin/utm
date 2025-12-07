@@ -659,6 +659,106 @@ app.get('/admin/debug/clicks', async (req, res) => {
     }
 });
 
+// Rota para verificar click específico
+app.get('/verify-click/:click_id', async (req, res) => {
+    try {
+        const clickId = req.params.click_id;
+
+        const result = await pool.query(
+            `SELECT 
+                click_id,
+                utm_source,
+                utm_medium,
+                utm_campaign,
+                utm_content,
+                utm_term,
+                utm_id,
+                ttclid,
+                fbclid,
+                gclid,
+                landing_page,
+                referrer,
+                received_at
+            FROM clicks 
+            WHERE click_id = $1`,
+            [clickId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Click não encontrado no banco de dados',
+                click_id: clickId
+            });
+        }
+
+        const clickData = result.rows[0];
+
+        res.json({
+            success: true,
+            message: 'Click encontrado!',
+            click_id: clickId,
+            data: clickData,
+            has_utm: !!clickData.utm_source,
+            timestamp: clickData.received_at,
+            utm_params: {
+                source: clickData.utm_source,
+                medium: clickData.utm_medium,
+                campaign: clickData.utm_campaign,
+                content: clickData.utm_content,
+                term: clickData.utm_term,
+                id: clickData.utm_id
+            },
+            platform_ids: {
+                ttclid: clickData.ttclid,
+                fbclid: clickData.fbclid,
+                gclid: clickData.gclid
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao verificar click:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Últimos 10 cliques
+app.get('/recent-clicks', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                click_id,
+                utm_source,
+                utm_campaign,
+                utm_content,
+                ttclid,
+                landing_page,
+                received_at
+            FROM clicks 
+            ORDER BY received_at DESC 
+            LIMIT 10
+        `);
+
+        res.json({
+            success: true,
+            count: result.rows.length,
+            clicks: result.rows.map(row => ({
+                click_id: row.click_id,
+                utm_source: row.utm_source || '(vazio)',
+                utm_campaign: row.utm_campaign || '(vazio)',
+                utm_content: row.utm_content || '(vazio)',
+                ttclid: row.ttclid ? 'SIM' : 'NÃO',
+                received_at: row.received_at,
+                has_utm: !!(row.utm_source || row.utm_campaign)
+            }))
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao buscar clicks recentes:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Rota para buscar parâmetros UTM salvos
 app.get('/api/utm-params/:click_id', async (req, res) => {
     try {
